@@ -1,6 +1,6 @@
 # wisp-agent
 
-A lightweight local AI agent powered by a local LLM via [mlx-lm](https://github.com/ml-explore/mlx-lm). No cloud API dependencies — everything runs on your machine.
+A lightweight local AI agent that connects to any OpenAI-compatible local LLM server. No cloud API dependencies — everything runs on your machine.
 
 ## Features
 

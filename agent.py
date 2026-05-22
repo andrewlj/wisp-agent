@@ -38,9 +38,11 @@ MODEL      = _cfg["model"]["name"]
 MAX_TOKENS = _cfg["model"]["max_tokens"]
 MAX_TURNS  = _cfg["agent"]["max_turns"]
 BASH_TO    = _cfg["agent"]["bash_timeout"]
-VISION     = _cfg.get("model", {}).get("vision", False)
-WORKSPACE  = _cfg["agent"].get("workspace", "~/wisp-workspace")
-STRICT     = _cfg["agent"].get("strict_workspace", True)
+VISION          = _cfg.get("model", {}).get("vision", False)
+WORKSPACE       = _cfg["agent"].get("workspace", "~/wisp-workspace")
+STRICT          = _cfg["agent"].get("strict_workspace", True)
+CTX_LIMIT       = _cfg["agent"].get("context_limit", 6000)
+CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
 
 # Initialise workspace sandbox
 from tools import init_workspace
@@ -368,10 +370,119 @@ def run_turn(messages: list, turn: int = 0, max_turns: int = 0) -> bool:
 
     return False
 
+# ── Context Compression ───────────────────────────────────────────────────────
+
+def _estimate_tokens(messages: list) -> int:
+    """Rough token estimate: total chars / 4."""
+    total = 0
+    for m in messages:
+        c = m.get("content") or ""
+        if isinstance(c, list):
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+        total += len(str(c))
+        # also count tool_calls arguments
+        for tc in m.get("tool_calls", []):
+            total += len(tc.get("function", {}).get("arguments", ""))
+    return total // 4
+
+
+def _call_api_simple(messages: list) -> str:
+    """Single non-streaming LLM call; returns content string."""
+    resp = requests.post(
+        BASE_URL,
+        headers={"Authorization": f"Bearer {API_KEY}"},
+        json={
+            "model":      MODEL,
+            "messages":   messages,
+            "max_tokens": 1024,
+            "stream":     False,
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _maybe_compress(messages: list) -> None:
+    """Compress context in-place if token estimate exceeds CTX_LIMIT.
+
+    Keeps messages[0] (system prompt) + the last CTX_KEEP_RECENT messages
+    verbatim. Summarises everything in between with a single LLM call and
+    replaces those messages with one system-role summary message.
+    """
+    if CTX_LIMIT <= 0:
+        return
+    est = _estimate_tokens(messages)
+    if est <= CTX_LIMIT:
+        return
+
+    # Need at least system + 2 middle + recent to bother compressing
+    min_len = 1 + 2 + CTX_KEEP_RECENT
+    if len(messages) < min_len:
+        return
+
+    sys_msg  = messages[0]
+    recent   = messages[-CTX_KEEP_RECENT:]
+    middle   = messages[1: len(messages) - CTX_KEEP_RECENT]
+
+    # Build a plain-text transcript of the middle section for summarisation
+    lines = []
+    for m in middle:
+        role = m.get("role", "?")
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                fn = tc.get("function", {})
+                lines.append(f"[tool_call] {fn.get('name','')}({fn.get('arguments','')})")
+        elif content:
+            lines.append(f"[{role}] {content}")
+
+    transcript = "\n".join(lines)
+    summary_prompt = [
+        {"role": "system", "content":
+            "You are a memory compressor. Summarise the following conversation excerpt "
+            "into a compact but complete recap. Preserve: task goals, key facts, "
+            "decisions made, commands run and their outcomes, and any open questions. "
+            "Respond with plain text only — no preamble, no commentary."},
+        {"role": "user", "content": transcript},
+    ]
+
+    # Print visual notice
+    before = len(messages)
+    label  = f" compressing context ({est} est. tokens → summarising {len(middle)} messages) "
+    bar_w  = _TURN_WIDTH - len(label) - 2
+    left_b = 4
+    right_b = max(0, bar_w - left_b)
+    notice = (f"{_rgb(90,60,180)}{'─'*left_b}{C.RESET}"
+              f"{C.DIM}{_rgb(150,120,220)}{label}{C.RESET}"
+              f"{_rgb(90,60,180)}{'─'*right_b}{C.RESET}")
+    print(f"\n  {notice}")
+
+    try:
+        summary_text = _call_api_simple(summary_prompt)
+    except Exception as e:
+        print(f"  {_rgb(200,80,80)}context compression failed: {e}{C.RESET}")
+        return
+
+    summary_msg = {
+        "role":    "system",
+        "content": f"[Conversation Summary — earlier context compressed]\n{summary_text}",
+    }
+
+    # Replace messages in-place: system + summary + recent
+    messages[1:len(messages) - CTX_KEEP_RECENT] = [summary_msg]
+    after = len(messages)
+    print(f"  {_rgb(90,60,180)}→{C.RESET} {C.DIM}{_rgb(150,120,220)}"
+          f"context compressed: {before} → {after} messages{C.RESET}")
+
+
 # ── Agent Loop ────────────────────────────────────────────────────────────────
 
 def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
     messages.append({"role": "user", "content": user_input})
+    _maybe_compress(messages)
     for turn in range(1, MAX_TURNS + 1):
         _print_turn_header(turn, MAX_TURNS)
         if run_turn(messages, turn, MAX_TURNS):

@@ -12,3 +12,5 @@ agent:
   bash_timeout: 30
   workspace: "~/wisp-workspace"     # all agent outputs go here
   strict_workspace: true            # block writes/deletes outside workspace
+  context_limit: 6000               # estimated tokens before compression kicks in
+  context_keep_recent: 6            # number of recent messages to keep verbatim

@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-wisp-agent - Layer 2A
-A lightweight local AI agent. Streaming, multi-turn, colored terminal.
-Dependencies: requests, pyyaml, prompt_toolkit
+wisp-agent
+A lightweight local AI agent for macOS automation.
+Dependencies: requests, pyyaml, prompt_toolkit, playwright
 """
 
-import base64
 import json
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 import requests
 import yaml
 from prompt_toolkit import prompt
 from prompt_toolkit.history import InMemoryHistory
+
+from tools import SCHEMAS, dispatch
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -30,13 +29,13 @@ def _load_config() -> dict:
 
 _cfg = _load_config()
 
-BASE_URL     = _cfg["server"]["base_url"]
-API_KEY      = _cfg["server"]["api_key"]
-MODEL        = _cfg["model"]["name"]
-MAX_TOKENS   = _cfg["model"]["max_tokens"]
-MAX_TURNS    = _cfg["agent"]["max_turns"]
-BASH_TIMEOUT = _cfg["agent"]["bash_timeout"]
-VISION       = _cfg.get("model", {}).get("vision", False)
+BASE_URL   = _cfg["server"]["base_url"]
+API_KEY    = _cfg["server"]["api_key"]
+MODEL      = _cfg["model"]["name"]
+MAX_TOKENS = _cfg["model"]["max_tokens"]
+MAX_TURNS  = _cfg["agent"]["max_turns"]
+BASH_TO    = _cfg["agent"]["bash_timeout"]
+VISION     = _cfg.get("model", {}).get("vision", False)
 
 SYSTEM_PROMPT = """You are a helpful assistant running on macOS (Apple Silicon). \
 You have tools to complete tasks on the user's Mac.
@@ -44,26 +43,26 @@ You have tools to complete tasks on the user's Mac.
 ## Shell environment
 - Shell: zsh. Python: python3.11. Package manager: Homebrew (brew).
 - Always use macOS/BSD command syntax — NOT Linux/GNU syntax. Key differences:
-  - Memory: `vm_stat`, `top -l 1`, `sysctl hw.memsize` — NOT `free`
-  - Disk: `df -h`, `diskutil` — NOT `lsblk`
+  - Memory : `vm_stat`, `sysctl hw.memsize` — NOT `free`
+  - Disk   : `df -h`, `diskutil` — NOT `lsblk`
   - Process: `ps aux` or `ps -eo pid,rss,comm` (BSD flags, no `--` prefix)
-  - File info: `stat -f "%z %N"` — NOT `stat --format`
-  - Date: `date -r <epoch>` — NOT `date -d`
-  - sed: `sed -i ''` — NOT `sed -i`
-  - Screenshot: `screenshot` tool (full screen or specific app window)
-  - Open files/URLs/apps: `open <path|url>` or `open -a <AppName>`
-  - Clipboard: `pbcopy` / `pbpaste`
-  - Notifications: `osascript -e 'display notification "msg" with title "title"'`
-  - System info: `system_profiler`, `sysctl`, `sw_vers`
+  - File   : `stat -f "%z %N"` — NOT `stat --format`
+  - Date   : `date -r <epoch>` — NOT `date -d`
+  - sed    : `sed -i ''` — NOT `sed -i`
 
 ## Tool usage rules
 - Prefer a single well-formed command over multiple probing attempts.
-- If a command fails, read the error carefully and fix the syntax before retrying.
-- Use `read_file` / `write_file` for file content; use `bash` for everything else.
-- Use `osascript` to send notifications, control apps, or show dialogs — not bash.
-- Use `clipboard_read` / `clipboard_write` for clipboard — not pbpaste/pbcopy in bash.
-- Use `open` to launch files, URLs, or apps — not bash.
-- Call `done` as soon as the task is complete — do not keep running extra checks.
+- If a command fails, read the error and fix it before retrying.
+- Use `read_file` / `write_file` for file content; `bash` for everything else.
+- Use `osascript` for notifications, app control, dialogs — not bash.
+- Use `clipboard_read` / `clipboard_write` for clipboard.
+- Use `screenshot` to capture the screen or a specific app window.
+- Use `list_apps` / `focus_app` / `quit_app` to manage running applications.
+- Use `find_files` to search by name, extension, or keyword (Spotlight-powered).
+- Use `move_file` / `copy_file` / `delete_file` for file operations.
+- Use `http_get` / `http_post` for HTTP requests.
+- Use `browser_*` tools for interactive web automation (form fill, click, scrape).
+- Call `done` as soon as the task is fully complete.
 """
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -81,301 +80,16 @@ class C:
 def c(color: str, text: str) -> str:
     return f"{color}{text}{C.RESET}"
 
-# ── Tool Schemas ──────────────────────────────────────────────────────────────
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Run a shell command on macOS. Use for file ops, system info, running scripts, etc.",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the full text content of a file.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write text content to a file, creating parent directories if needed.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path":    {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "screenshot",
-            "description": (
-                "Capture the screen (or a specific app window) and save it as a PNG. "
-                "Returns the saved file path. If the model supports vision, "
-                "the image is also embedded for direct analysis."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "app": {
-                        "type": "string",
-                        "description": "Optional: capture only this app's window, e.g. 'Safari'. Omit for full screen.",
-                    },
-                    "save_path": {
-                        "type": "string",
-                        "description": "Optional: where to save the PNG. Defaults to /tmp/wisp-<timestamp>.png",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "osascript",
-            "description": (
-                "Run an AppleScript snippet on macOS. "
-                "Use for: sending system notifications, controlling apps (Finder, Safari, Mail…), "
-                "showing dialog boxes, getting frontmost app, etc."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"script": {"type": "string", "description": "AppleScript code to execute"}},
-                "required": ["script"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "clipboard_read",
-            "description": "Read the current contents of the macOS clipboard.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "clipboard_write",
-            "description": "Write text to the macOS clipboard.",
-            "parameters": {
-                "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open",
-            "description": "Open a file, directory, URL, or application on macOS. Equivalent to double-clicking in Finder.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string", "description": "File path, URL, or app name"},
-                    "app":    {"type": "string", "description": "Optional: open with a specific app, e.g. 'TextEdit'"},
-                },
-                "required": ["target"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "done",
-            "description": "Call this when the task is fully complete.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "result": {"type": "string", "description": "Summary of what was accomplished"}
-                },
-                "required": ["result"],
-            },
-        },
-    },
-]
-
-# ── Tool Implementations ──────────────────────────────────────────────────────
-
-def tool_bash(command: str) -> str:
-    try:
-        proc = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=BASH_TIMEOUT,
-        )
-        parts = []
-        if proc.stdout:
-            parts.append(proc.stdout.rstrip())
-        if proc.stderr:
-            parts.append(f"[stderr]\n{proc.stderr.rstrip()}")
-        parts.append(f"[exit {proc.returncode}]")
-        return "\n".join(parts)
-    except subprocess.TimeoutExpired:
-        return f"error: timed out after {BASH_TIMEOUT}s"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def tool_read_file(path: str) -> str:
-    try:
-        return Path(path).expanduser().read_text()
-    except FileNotFoundError:
-        return f"error: file not found: {path}"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def tool_write_file(path: str, content: str) -> str:
-    try:
-        p = Path(path).expanduser()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
-        return f"ok: wrote {len(content)} chars to {p}"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def tool_screenshot(app: str = "", save_path: str = "") -> str | dict:
-    """
-    Returns a plain string when VISION=False,
-    or a dict {"text": ..., "image_b64": ...} when VISION=True.
-    """
-    path = save_path or f"/tmp/wisp-{int(time.time())}.png"
-    try:
-        cmd = ["screencapture", "-x"]          # -x = silent (no shutter sound)
-        if app:
-            # Capture the frontmost window of the specified app
-            cmd += ["-l", _get_window_id(app)]
-        cmd.append(path)
-
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            err = proc.stderr.rstrip()
-            if "could not create image" in err:
-                return (
-                    "error: screen recording permission denied. "
-                    "Grant permission in: System Settings → Privacy & Security "
-                    "→ Screen Recording → enable your Terminal app."
-                )
-            return f"error: screencapture failed — {err}"
-
-        if not VISION:
-            return f"ok: screenshot saved to {path}"
-
-        # Embed image as base64 for vision-capable models
-        b64 = base64.b64encode(Path(path).read_bytes()).decode()
-        return {"text": f"Screenshot saved to {path}", "image_b64": b64}
-
-    except Exception as e:
-        return f"error: {e}"
-
-
-def _get_window_id(app: str) -> str:
-    """Get the CGWindowID of the frontmost window of an app (for -l flag)."""
-    script = (
-        f'tell application "System Events" to tell process "{app}" '
-        f'to get id of front window'
-    )
-    proc = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-    return proc.stdout.strip()
-
-
-def tool_osascript(script: str) -> str:
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=15,
-        )
-        parts = []
-        if proc.stdout:
-            parts.append(proc.stdout.rstrip())
-        if proc.stderr:
-            parts.append(f"[stderr]\n{proc.stderr.rstrip()}")
-        parts.append(f"[exit {proc.returncode}]")
-        return "\n".join(parts)
-    except subprocess.TimeoutExpired:
-        return "error: osascript timed out after 15s"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def tool_clipboard_read() -> str:
-    try:
-        proc = subprocess.run(["pbpaste"], capture_output=True, text=True)
-        return proc.stdout or "(clipboard is empty)"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def tool_clipboard_write(text: str) -> str:
-    try:
-        subprocess.run(["pbcopy"], input=text, text=True, check=True)
-        return f"ok: wrote {len(text)} chars to clipboard"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def tool_open(target: str, app: str = "") -> str:
-    try:
-        cmd = ["open"]
-        if app:
-            cmd += ["-a", app]
-        cmd.append(target)
-        subprocess.run(cmd, check=True)
-        return f"ok: opened {target}" + (f" with {app}" if app else "")
-    except subprocess.CalledProcessError as e:
-        return f"error: {e}"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def dispatch(name: str, args: dict) -> str | dict:
-    match name:
-        case "bash":            return tool_bash(args["command"])
-        case "read_file":       return tool_read_file(args["path"])
-        case "write_file":      return tool_write_file(args["path"], args["content"])
-        case "screenshot":      return tool_screenshot(args.get("app", ""), args.get("save_path", ""))
-        case "osascript":       return tool_osascript(args["script"])
-        case "clipboard_read":  return tool_clipboard_read()
-        case "clipboard_write": return tool_clipboard_write(args["text"])
-        case "open":            return tool_open(args["target"], args.get("app", ""))
-        case _:                 return f"error: unknown tool '{name}'"
-
 # ── Streaming API ─────────────────────────────────────────────────────────────
 
 def call_api_stream(messages: list) -> tuple[str, list[dict]]:
-    """
-    Stream a response from the API.
-    Returns (full_content, tool_calls) where each tool_call is:
-      {"id": str, "name": str, "arguments": str}
-    Text content is printed to stdout as it arrives.
-    """
     resp = requests.post(
         BASE_URL,
         headers={"Authorization": f"Bearer {API_KEY}"},
         json={
             "model":       MODEL,
             "messages":    messages,
-            "tools":       TOOLS,
+            "tools":       SCHEMAS,
             "tool_choice": "auto",
             "max_tokens":  MAX_TOKENS,
             "stream":      True,
@@ -386,7 +100,7 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
     resp.raise_for_status()
 
     full_content = ""
-    acc: dict[int, dict] = {}  # index → {id, name, arguments}
+    acc: dict[int, dict] = {}
 
     for raw in resp.iter_lines():
         if not raw or not raw.startswith(b"data: "):
@@ -394,17 +108,14 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
         data = raw[6:]
         if data == b"[DONE]":
             break
-
         chunk  = json.loads(data)
         choice = chunk["choices"][0]
         delta  = choice.get("delta", {})
 
-        # Stream text
         if delta.get("content"):
             print(delta["content"], end="", flush=True)
             full_content += delta["content"]
 
-        # Accumulate tool call fragments
         for tc in delta.get("tool_calls", []):
             idx = tc["index"]
             if idx not in acc:
@@ -412,40 +123,30 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
             if tc.get("id"):
                 acc[idx]["id"] = tc["id"]
             fn = tc.get("function", {})
-            if fn.get("name"):
-                acc[idx]["name"] += fn["name"]
-            if fn.get("arguments"):
-                acc[idx]["arguments"] += fn["arguments"]
+            if fn.get("name"):      acc[idx]["name"]      += fn["name"]
+            if fn.get("arguments"): acc[idx]["arguments"] += fn["arguments"]
 
     if full_content:
-        print()  # trailing newline after streamed text
+        print()
 
     return full_content, [acc[i] for i in sorted(acc)]
 
 # ── Agent Turn ────────────────────────────────────────────────────────────────
 
 def run_turn(messages: list) -> bool:
-    """
-    Execute one LLM turn, appending results to messages in place.
-    Returns True when the conversation should stop (done tool or plain reply).
-    """
     content, tool_calls = call_api_stream(messages)
 
-    # Reconstruct the assistant message with tool_calls if present
     assistant_msg: dict = {"role": "assistant", "content": content}
     if tool_calls:
         assistant_msg["tool_calls"] = [
-            {
-                "id":   tc["id"],
-                "type": "function",
-                "function": {"name": tc["name"], "arguments": tc["arguments"]},
-            }
+            {"id": tc["id"], "type": "function",
+             "function": {"name": tc["name"], "arguments": tc["arguments"]}}
             for tc in tool_calls
         ]
     messages.append(assistant_msg)
 
     if not tool_calls:
-        return True  # plain text reply, stop
+        return True
 
     for tc in tool_calls:
         name = tc["name"]
@@ -457,12 +158,10 @@ def run_turn(messages: list) -> bool:
             print(c(C.GREEN, C.BOLD + f"\n✓ {args['result']}") + C.RESET)
             return True
 
-        result = dispatch(name, args)
+        result = dispatch(name, args, vision=VISION)
 
-        # Build tool message — plain string or multimodal (vision)
         if isinstance(result, dict) and "image_b64" in result:
-            text_preview = result["text"]
-            print(c(C.GRAY, f"  ← {text_preview}") + c(C.CYAN, " [image]"))
+            print(c(C.GRAY, f"  ← {result['text']}") + c(C.CYAN, " [image]"))
             tool_content = [
                 {"type": "text", "text": result["text"]},
                 {"type": "image_url", "image_url": {
@@ -470,14 +169,12 @@ def run_turn(messages: list) -> bool:
                 }},
             ]
         else:
-            preview = result[:300] + ("…" if len(result) > 300 else "")
+            preview = str(result)[:300] + ("…" if len(str(result)) > 300 else "")
             print(c(C.GRAY, f"  ← {preview}"))
             tool_content = result
 
         messages.append({
-            "role":         "tool",
-            "tool_call_id": tc["id"],
-            "content":      tool_content,
+            "role": "tool", "tool_call_id": tc["id"], "content": tool_content,
         })
 
     return False
@@ -486,7 +183,6 @@ def run_turn(messages: list) -> bool:
 
 def run_agent(user_input: str, messages: list) -> None:
     messages.append({"role": "user", "content": user_input})
-
     for turn in range(1, MAX_TURNS + 1):
         print(c(C.DIM, f"\n[turn {turn}]"))
         if run_turn(messages):
@@ -497,10 +193,10 @@ def run_agent(user_input: str, messages: list) -> None:
 # ── Interactive REPL ──────────────────────────────────────────────────────────
 
 def interactive() -> None:
-    print(c(C.BOLD, "Local Agent"))
-    print(c(C.GRAY, "Commands: 'reset' to clear history, 'exit' to quit\n"))
+    print(c(C.BOLD, "wisp-agent"))
+    print(c(C.GRAY, "Commands: reset | exit\n"))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    history = InMemoryHistory()
+    history  = InMemoryHistory()
 
     while True:
         try:
@@ -508,13 +204,10 @@ def interactive() -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             break
-
         if not user_input:
             continue
-
         match user_input.lower():
-            case "exit" | "quit":
-                break
+            case "exit" | "quit": break
             case "reset":
                 messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                 print(c(C.GRAY, "History cleared."))

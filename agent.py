@@ -31,7 +31,7 @@ def _load_config() -> dict:
 
 _cfg = _load_config()
 
-VERSION    = "0.3"
+VERSION    = "0.4"
 BASE_URL   = _cfg["server"]["base_url"]
 API_KEY    = _cfg["server"]["api_key"]
 MODEL      = _cfg["model"]["name"]
@@ -111,39 +111,105 @@ _W = ["██╗    ██╗", "██║    ██║", "██║ █╗ █�
 _I = ["██╗",        "██║",        "██║",        "██║",        "██║",        "╚═╝"       ]
 _S = ["███████╗",   "██╔════╝",   "███████╗",   "╚════██║",   "███████║",   "╚══════╝"  ]
 _P = ["██████╗ ",   "██╔══██╗",   "██████╔╝",   "██╔═══╝ ",   "██║     ",   "╚═╝     "  ]
+_DA = ["      ",    "      ",     "──────",     "──────",     "      ",     "      "    ]
+_A = [" █████╗ ",   "██╔══██╗",   "███████║",   "██╔══██║",   "██║  ██║",   "╚═╝  ╚═╝"  ]
+_G = [" ██████╗ ",  "██╔════╝ ",  "██║  ███╗",  "██║   ██║",  "╚██████╔╝",  " ╚═════╝ " ]
+_E = ["███████╗",   "██╔════╝",   "█████╗  ",   "██╔══╝  ",   "███████╗",   "╚══════╝"  ]
+_N = ["███╗  ██╗",  "████╗ ██║",  "██╔██╗██║",  "██║╚████║",  "██║ ╚███║",  "╚═╝  ╚══╝" ]
+_T = ["████████╗",  "╚══██╔══╝",  "   ██║   ",  "   ██║   ",  "   ██║   ",  "   ╚═╝   " ]
 
 _LOGO_COLORS = [
-    (  0, 255, 255), (  0, 235, 245), (  0, 215, 230),
-    (  0, 190, 210), (  0, 165, 190), (  0, 140, 170),
+    (  0, 255, 255), (  0, 238, 248), (  0, 218, 235),
+    (  0, 195, 218), (  0, 168, 198), (  0, 140, 175),
 ]
-_SEP_COLOR = _rgb(0, 120, 140)
-_SEP       = f"{_SEP_COLOR}  ·  {C.RESET}"
+_DASH_C = _rgb(0, 150, 175)
+
+_TOOLS_MAP = [
+    ("core",    ["bash", "read_file", "write_file", "done"]),
+    ("mac",     ["screenshot", "osascript", "clipboard_*", "open",
+                 "list_apps", "focus_app", "quit_app"]),
+    ("files",   ["find_files", "move_file", "copy_file", "delete_file"]),
+    ("network", ["http_get", "http_post"]),
+    ("browser", ["browser_open", "browser_click", "browser_type",
+                 "browser_get_text", "browser_screenshot", "browser_close"]),
+    ("task",    ["task_init", "task_step_done", "task_step_fail"]),
+]
+
+def _rpad(s: str, width: int) -> str:
+    import re
+    visible = len(re.sub(r'\033\[[^m]*m', '', s))
+    return s + " " * max(0, width - visible)
 
 def print_banner() -> None:
+    import session as _sess
+    # ── Logo: WISP-AGENT ──────────────────────────────────────────────────────
     print()
+    sp = "  "
     for row in range(6):
         r, g, b = _LOGO_COLORS[row]
         lc = f"\033[1m{_rgb(r, g, b)}"
-        print("  " + lc + _W[row] + C.RESET
-              + _SEP
-              + lc + _I[row] + C.RESET
-              + _SEP
-              + lc + _S[row] + C.RESET
-              + _SEP
-              + lc + _P[row] + C.RESET)
+        dc = _DASH_C
+        print("  "
+              + lc + _W[row]  + C.RESET + sp
+              + lc + _I[row]  + C.RESET + sp
+              + lc + _S[row]  + C.RESET + sp
+              + lc + _P[row]  + C.RESET
+              + "  " + dc + _DA[row] + C.RESET + "  "
+              + lc + _A[row]  + C.RESET + sp
+              + lc + _G[row]  + C.RESET + sp
+              + lc + _E[row]  + C.RESET + sp
+              + lc + _N[row]  + C.RESET + sp
+              + lc + _T[row]  + C.RESET)
 
-    sep  = f"{_rgb(60, 60, 60)}  ·  {C.RESET}"
-    dim  = C.DIM
-    teal = _rgb(0, 200, 200)
-    gray = _rgb(160, 160, 160)
+    # ── Subtitle ──────────────────────────────────────────────────────────────
     print()
-    print(f"  {dim}{gray}A lightweight local AI agent for macOS{C.RESET}"
-          f"{sep}{dim}{gray}v{VERSION}{C.RESET}")
-    print(f"  {dim}model: {teal}{MODEL}{C.RESET}"
-          f"{sep}{dim}tools: {teal}{len(__import__('tools').SCHEMAS)}{C.RESET}")
+    dot_sep = f"{_rgb(55, 55, 55)}  ·  {C.RESET}"
+    print(f"  {_rgb(0,210,210)}幽灵轻使{C.RESET}"
+          f"{dot_sep}{C.DIM}{_rgb(150,150,150)}A ghost of light, at your command{C.RESET}")
+
+    # ── Info panel ────────────────────────────────────────────────────────────
     print()
-    print(f"  {_rgb(90,90,90)}/help{C.RESET}  show commands"
-          f"       {_rgb(90,90,90)}/exit{C.RESET}  quit")
+    bc       = _rgb(0, 75, 90)
+    teal     = _rgb(0, 215, 215)
+    cat_c    = _rgb(0, 165, 175)
+    val_c    = _rgb(185, 185, 185)
+    dim_gray = C.DIM + _rgb(115, 115, 115)
+    meta_c   = _rgb(0, 165, 178)
+    W        = 72   # inner panel width
+
+    n_tools = len(SCHEMAS)
+    from datetime import datetime
+    today = datetime.now().strftime("%Y.%-m.%-d")
+
+    def row(content: str) -> None:
+        print(f"  {bc}│{C.RESET} {_rpad(content, W)} {bc}│{C.RESET}")
+
+    print(f"  {bc}┌{'─'*(W+2)}┐{C.RESET}")
+
+    # version + date
+    row(f"{C.BOLD}{teal}wisp v{VERSION}{C.RESET}  {dim_gray}({today}){C.RESET}")
+    row("")
+
+    # tools by category
+    row(f"{C.BOLD}{teal}▶ Tools  {dim_gray}({n_tools} total){C.RESET}")
+    for cat, tools in _TOOLS_MAP:
+        joined = ", ".join(tools)
+        max_w  = W - len(cat) - 4
+        if len(joined) > max_w:
+            joined = joined[:max_w - 1] + "…"
+        row(f"  {cat_c}{cat}:{C.RESET}  {val_c}{joined}{C.RESET}")
+
+    row("")
+    row(f"{dim_gray}/help for commands{C.RESET}")
+
+    # meta: model · workspace · session
+    n_sess  = _sess.count()
+    sess_hint = f"  ·  {n_sess} saved session{'s' if n_sess != 1 else ''}" if n_sess else ""
+    print(f"  {bc}├{'─'*(W+2)}┤{C.RESET}")
+    meta = (f"{meta_c}{MODEL}{C.RESET}  "
+            f"{dim_gray}·  {WORKSPACE}{sess_hint}{C.RESET}")
+    row(meta)
+    print(f"  {bc}└{'─'*(W+2)}┘{C.RESET}")
     print()
 
 # ── Streaming API ─────────────────────────────────────────────────────────────

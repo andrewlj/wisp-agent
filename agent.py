@@ -56,6 +56,9 @@ You have tools to complete tasks on the user's Mac.
 - Prefer a single well-formed command over multiple probing attempts.
 - If a command fails, read the error carefully and fix the syntax before retrying.
 - Use `read_file` / `write_file` for file content; use `bash` for everything else.
+- Use `osascript` to send notifications, control apps, or show dialogs — not bash.
+- Use `clipboard_read` / `clipboard_write` for clipboard — not pbpaste/pbcopy in bash.
+- Use `open` to launch files, URLs, or apps — not bash.
 - Call `done` as soon as the task is complete — do not keep running extra checks.
 """
 
@@ -119,6 +122,57 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "osascript",
+            "description": (
+                "Run an AppleScript snippet on macOS. "
+                "Use for: sending system notifications, controlling apps (Finder, Safari, Mail…), "
+                "showing dialog boxes, getting frontmost app, etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"script": {"type": "string", "description": "AppleScript code to execute"}},
+                "required": ["script"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clipboard_read",
+            "description": "Read the current contents of the macOS clipboard.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clipboard_write",
+            "description": "Write text to the macOS clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open",
+            "description": "Open a file, directory, URL, or application on macOS. Equivalent to double-clicking in Finder.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "File path, URL, or app name"},
+                    "app":    {"type": "string", "description": "Optional: open with a specific app, e.g. 'TextEdit'"},
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "done",
             "description": "Call this when the task is fully complete.",
             "parameters": {
@@ -171,12 +225,65 @@ def tool_write_file(path: str, content: str) -> str:
         return f"error: {e}"
 
 
+def tool_osascript(script: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        parts = []
+        if proc.stdout:
+            parts.append(proc.stdout.rstrip())
+        if proc.stderr:
+            parts.append(f"[stderr]\n{proc.stderr.rstrip()}")
+        parts.append(f"[exit {proc.returncode}]")
+        return "\n".join(parts)
+    except subprocess.TimeoutExpired:
+        return "error: osascript timed out after 15s"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_clipboard_read() -> str:
+    try:
+        proc = subprocess.run(["pbpaste"], capture_output=True, text=True)
+        return proc.stdout or "(clipboard is empty)"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_clipboard_write(text: str) -> str:
+    try:
+        subprocess.run(["pbcopy"], input=text, text=True, check=True)
+        return f"ok: wrote {len(text)} chars to clipboard"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_open(target: str, app: str = "") -> str:
+    try:
+        cmd = ["open"]
+        if app:
+            cmd += ["-a", app]
+        cmd.append(target)
+        subprocess.run(cmd, check=True)
+        return f"ok: opened {target}" + (f" with {app}" if app else "")
+    except subprocess.CalledProcessError as e:
+        return f"error: {e}"
+    except Exception as e:
+        return f"error: {e}"
+
+
 def dispatch(name: str, args: dict) -> str:
     match name:
-        case "bash":       return tool_bash(args["command"])
-        case "read_file":  return tool_read_file(args["path"])
-        case "write_file": return tool_write_file(args["path"], args["content"])
-        case _:            return f"error: unknown tool '{name}'"
+        case "bash":            return tool_bash(args["command"])
+        case "read_file":       return tool_read_file(args["path"])
+        case "write_file":      return tool_write_file(args["path"], args["content"])
+        case "osascript":       return tool_osascript(args["script"])
+        case "clipboard_read":  return tool_clipboard_read()
+        case "clipboard_write": return tool_clipboard_write(args["text"])
+        case "open":            return tool_open(args["target"], args.get("app", ""))
+        case _:                 return f"error: unknown tool '{name}'"
 
 # ── Streaming API ─────────────────────────────────────────────────────────────
 

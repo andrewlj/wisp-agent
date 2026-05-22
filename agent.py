@@ -142,8 +142,8 @@ def print_banner() -> None:
     print(f"  {dim}model: {teal}{MODEL}{C.RESET}"
           f"{sep}{dim}tools: {teal}{len(__import__('tools').SCHEMAS)}{C.RESET}")
     print()
-    print(f"  {_rgb(90,90,90)}reset{C.RESET}  clear history"
-          f"       {_rgb(90,90,90)}exit{C.RESET}  quit")
+    print(f"  {_rgb(90,90,90)}/help{C.RESET}  show commands"
+          f"       {_rgb(90,90,90)}/exit{C.RESET}  quit")
     print()
 
 # ── Streaming API ─────────────────────────────────────────────────────────────
@@ -290,11 +290,11 @@ def interactive() -> None:
 
     print_banner()
 
-    # Hint if there are saved sessions or tasks
+    # Hint if there are saved sessions
     n_sessions = _session.count()
     if n_sessions:
         print(c(C.GRAY, f"  {n_sessions} saved session{'s' if n_sessions > 1 else ''}  ·  "
-                        f"type 'sessions' to browse\n"))
+                        f"/sessions to browse\n"))
 
     repl = PromptSession(history=InMemoryHistory())
 
@@ -307,79 +307,89 @@ def interactive() -> None:
         if not user_input:
             continue
 
-        cmd = user_input.lower()
+        # ── /commands (slash-prefixed, never sent to LLM) ─────────────────
+        if user_input.startswith("/"):
+            parts = user_input[1:].split(maxsplit=1)
+            cmd   = parts[0].lower()
+            arg   = parts[1].strip() if len(parts) > 1 else ""
 
-        # ── built-in commands ──────────────────────────────────────────────
-        if cmd in ("exit", "quit"):
-            break
+            if cmd in ("exit", "quit"):
+                break
 
-        elif cmd == "sessions":
-            _print_sessions()
+            elif cmd == "sessions":
+                _print_sessions()
 
-        elif cmd.startswith("save"):
-            parts = user_input.split(maxsplit=1)
-            name  = parts[1].strip() if len(parts) > 1 else ""
-            _session.save(sid, messages, name=name)
-            print(c(C.GREEN, f"  saved as '{name or sid}'"))
+            elif cmd == "save":
+                _session.save(sid, messages, name=arg)
+                print(c(C.GREEN, f"  saved as '{arg or sid}'"))
 
-        elif cmd.startswith("load"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) < 2:
-                print(c(C.RED, "  usage: load <session-id or name>"))
-                continue
-            key  = parts[1].strip()
-            data = _session.load(key)
-            if data is None:
-                print(c(C.RED, f"  session not found: {key}"))
-            else:
-                messages = data["messages"]
-                sid      = data["id"]
+            elif cmd == "load":
+                if not arg:
+                    print(c(C.RED, "  usage: /load <session-id or name>"))
+                else:
+                    data = _session.load(arg)
+                    if data is None:
+                        print(c(C.RED, f"  session not found: {arg}"))
+                    else:
+                        messages = data["messages"]
+                        sid      = data["id"]
+                        _task.set_session_id(sid)
+                        print(c(C.GREEN,
+                                f"  loaded '{data.get('name') or sid}'  "
+                                f"({data['message_count']} messages)"))
+
+            elif cmd == "new":
+                _session.save(sid, messages)
+                sid      = _session.new_id()
+                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                 _task.set_session_id(sid)
-                print(c(C.GREEN,
-                        f"  loaded '{data.get('name') or sid}'  "
-                        f"({data['message_count']} messages)"))
+                _task.set_current_id(None)
+                print(c(C.GRAY, "  new session started"))
 
-        elif cmd == "new":
-            _session.save(sid, messages)
-            sid      = _session.new_id()
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            _task.set_session_id(sid)
-            _task.set_current_id(None)
-            print(c(C.GRAY, "  new session started"))
+            elif cmd == "reset":
+                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                _task.set_current_id(None)
+                print(c(C.GRAY, "  history cleared"))
 
-        elif cmd == "reset":
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            _task.set_current_id(None)
-            print(c(C.GRAY, "  history cleared"))
+            elif cmd == "tasks":
+                _print_tasks()
 
-        elif cmd == "tasks":
-            _print_tasks()
+            elif cmd == "resume":
+                if not arg:
+                    print(c(C.RED, "  usage: /resume <task-id>"))
+                else:
+                    tdata = _task.load(arg)
+                    if tdata is None:
+                        print(c(C.RED, f"  task not found: {arg}"))
+                    else:
+                        if tdata.get("session_id"):
+                            sdata = _session.load(tdata["session_id"])
+                            if sdata:
+                                messages = sdata["messages"]
+                                sid      = sdata["id"]
+                                _task.set_session_id(sid)
+                                print(c(C.GREEN, f"  restored session: {sid}"))
+                        context = _task.format_resume_context(tdata)
+                        messages.append({"role": "system", "content": context})
+                        _task.set_current_id(arg)
+                        print(c(C.CYAN, context))
 
-        elif cmd.startswith("resume"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) < 2:
-                print(c(C.RED, "  usage: resume <task-id>"))
-                continue
-            tid  = parts[1].strip()
-            tdata = _task.load(tid)
-            if tdata is None:
-                print(c(C.RED, f"  task not found: {tid}"))
-                continue
-            # Try to restore linked session
-            if tdata.get("session_id"):
-                sdata = _session.load(tdata["session_id"])
-                if sdata:
-                    messages = sdata["messages"]
-                    sid      = sdata["id"]
-                    _task.set_session_id(sid)
-                    print(c(C.GREEN, f"  restored session: {sid}"))
-            # Inject task resume context into messages
-            context = _task.format_resume_context(tdata)
-            messages.append({"role": "system", "content": context})
-            _task.set_current_id(tid)
-            print(c(C.CYAN, context))
+            elif cmd == "help":
+                print(c(C.GRAY,
+                    "  /sessions          list saved sessions\n"
+                    "  /save [name]       save current session\n"
+                    "  /load <name|id>    restore a session\n"
+                    "  /new               start a new session\n"
+                    "  /reset             clear current history\n"
+                    "  /tasks             list saved tasks\n"
+                    "  /resume <task-id>  resume an interrupted task\n"
+                    "  /exit              quit wisp"
+                ))
 
-        # ── agent turn ─────────────────────────────────────────────────────
+            else:
+                print(c(C.RED, f"  unknown command: /{cmd}  (try /help)"))
+
+        # ── regular input → LLM ───────────────────────────────────────────
         else:
             run_agent(user_input, messages, session_id=sid)
 

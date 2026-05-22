@@ -5,9 +5,11 @@ A lightweight local AI agent. Streaming, multi-turn, colored terminal.
 Dependencies: requests, pyyaml, prompt_toolkit
 """
 
+import base64
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -34,6 +36,7 @@ MODEL        = _cfg["model"]["name"]
 MAX_TOKENS   = _cfg["model"]["max_tokens"]
 MAX_TURNS    = _cfg["agent"]["max_turns"]
 BASH_TIMEOUT = _cfg["agent"]["bash_timeout"]
+VISION       = _cfg.get("model", {}).get("vision", False)
 
 SYSTEM_PROMPT = """You are a helpful assistant running on macOS (Apple Silicon). \
 You have tools to complete tasks on the user's Mac.
@@ -47,6 +50,7 @@ You have tools to complete tasks on the user's Mac.
   - File info: `stat -f "%z %N"` — NOT `stat --format`
   - Date: `date -r <epoch>` — NOT `date -d`
   - sed: `sed -i ''` — NOT `sed -i`
+  - Screenshot: `screenshot` tool (full screen or specific app window)
   - Open files/URLs/apps: `open <path|url>` or `open -a <AppName>`
   - Clipboard: `pbcopy` / `pbpaste`
   - Notifications: `osascript -e 'display notification "msg" with title "title"'`
@@ -116,6 +120,31 @@ TOOLS = [
                     "content": {"type": "string"},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screenshot",
+            "description": (
+                "Capture the screen (or a specific app window) and save it as a PNG. "
+                "Returns the saved file path. If the model supports vision, "
+                "the image is also embedded for direct analysis."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app": {
+                        "type": "string",
+                        "description": "Optional: capture only this app's window, e.g. 'Safari'. Omit for full screen.",
+                    },
+                    "save_path": {
+                        "type": "string",
+                        "description": "Optional: where to save the PNG. Defaults to /tmp/wisp-<timestamp>.png",
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -225,6 +254,51 @@ def tool_write_file(path: str, content: str) -> str:
         return f"error: {e}"
 
 
+def tool_screenshot(app: str = "", save_path: str = "") -> str | dict:
+    """
+    Returns a plain string when VISION=False,
+    or a dict {"text": ..., "image_b64": ...} when VISION=True.
+    """
+    path = save_path or f"/tmp/wisp-{int(time.time())}.png"
+    try:
+        cmd = ["screencapture", "-x"]          # -x = silent (no shutter sound)
+        if app:
+            # Capture the frontmost window of the specified app
+            cmd += ["-l", _get_window_id(app)]
+        cmd.append(path)
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            err = proc.stderr.rstrip()
+            if "could not create image" in err:
+                return (
+                    "error: screen recording permission denied. "
+                    "Grant permission in: System Settings → Privacy & Security "
+                    "→ Screen Recording → enable your Terminal app."
+                )
+            return f"error: screencapture failed — {err}"
+
+        if not VISION:
+            return f"ok: screenshot saved to {path}"
+
+        # Embed image as base64 for vision-capable models
+        b64 = base64.b64encode(Path(path).read_bytes()).decode()
+        return {"text": f"Screenshot saved to {path}", "image_b64": b64}
+
+    except Exception as e:
+        return f"error: {e}"
+
+
+def _get_window_id(app: str) -> str:
+    """Get the CGWindowID of the frontmost window of an app (for -l flag)."""
+    script = (
+        f'tell application "System Events" to tell process "{app}" '
+        f'to get id of front window'
+    )
+    proc = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
 def tool_osascript(script: str) -> str:
     try:
         proc = subprocess.run(
@@ -274,11 +348,12 @@ def tool_open(target: str, app: str = "") -> str:
         return f"error: {e}"
 
 
-def dispatch(name: str, args: dict) -> str:
+def dispatch(name: str, args: dict) -> str | dict:
     match name:
         case "bash":            return tool_bash(args["command"])
         case "read_file":       return tool_read_file(args["path"])
         case "write_file":      return tool_write_file(args["path"], args["content"])
+        case "screenshot":      return tool_screenshot(args.get("app", ""), args.get("save_path", ""))
         case "osascript":       return tool_osascript(args["script"])
         case "clipboard_read":  return tool_clipboard_read()
         case "clipboard_write": return tool_clipboard_write(args["text"])
@@ -383,13 +458,26 @@ def run_turn(messages: list) -> bool:
             return True
 
         result = dispatch(name, args)
-        preview = result[:300] + ("…" if len(result) > 300 else "")
-        print(c(C.GRAY, f"  ← {preview}"))
+
+        # Build tool message — plain string or multimodal (vision)
+        if isinstance(result, dict) and "image_b64" in result:
+            text_preview = result["text"]
+            print(c(C.GRAY, f"  ← {text_preview}") + c(C.CYAN, " [image]"))
+            tool_content = [
+                {"type": "text", "text": result["text"]},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/png;base64,{result['image_b64']}"
+                }},
+            ]
+        else:
+            preview = result[:300] + ("…" if len(result) > 300 else "")
+            print(c(C.GRAY, f"  ← {preview}"))
+            tool_content = result
 
         messages.append({
             "role":         "tool",
             "tool_call_id": tc["id"],
-            "content":      result,
+            "content":      tool_content,
         })
 
     return False

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +15,93 @@ from pathlib import Path
 from typing import Any
 
 import requests as _requests
+
+# ── Workspace sandbox ─────────────────────────────────────────────────────────
+
+_WORKSPACE: Path | None = None
+_STRICT: bool = True
+
+def init_workspace(workspace: str, strict: bool = True) -> None:
+    global _WORKSPACE, _STRICT
+    _WORKSPACE = Path(workspace).expanduser().resolve()
+    _WORKSPACE.mkdir(parents=True, exist_ok=True)
+    (workspace_path("screenshots")).mkdir(exist_ok=True)
+    _STRICT = strict
+
+def workspace_path(name: str = "") -> Path:
+    """Return a path inside the workspace, creating it if needed."""
+    if _WORKSPACE is None:
+        raise RuntimeError("workspace not initialised — call init_workspace() first")
+    p = _WORKSPACE / name if name else _WORKSPACE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _in_workspace(path: Path) -> bool:
+    if _WORKSPACE is None:
+        return False
+    try:
+        path.resolve().relative_to(_WORKSPACE)
+        return True
+    except ValueError:
+        return False
+
+def _guard_path(path: str, action: str = "write") -> str | None:
+    """
+    Returns an error string if the operation is not allowed,
+    or None if it's fine to proceed.
+    """
+    if not _STRICT:
+        return None
+    p = Path(path).expanduser().resolve()
+    if not _in_workspace(p):
+        return (
+            f"security: {action} outside workspace is not allowed. "
+            f"Workspace is {_WORKSPACE}. "
+            f"Use a path inside the workspace instead."
+        )
+    return None
+
+# ── Bash risk scanner ─────────────────────────────────────────────────────────
+
+_RISKY = [
+    (r"\brm\s+(-\w*[rRfF]\w*\s+|-\w*[rRfF]\w*$|--recursive|--force)", "destructive rm"),
+    (r"\bsudo\s+rm\b",   "sudo rm"),
+    (r"\b(mkfs|format)\b", "disk format"),
+    (r"\bdd\s+if=",      "dd disk write"),
+    (r"\bchmod\s+(777|a\+[wx])", "unsafe chmod"),
+    (r"\bsudo\b",        "sudo usage"),
+]
+
+# Patterns that write to a file path (shell redirects + tee + common write tools)
+_WRITE_OPS = re.compile(
+    r"(?:>>?|tee\s+|tee\s+-a\s+|cp\s+\S+\s+|mv\s+\S+\s+)"
+    r"([~/\$][^\s;|&>]+)"
+)
+
+def _bash_risk(command: str) -> str | None:
+    """Return a warning string if the command looks risky, else None."""
+    for pattern, label in _RISKY:
+        if re.search(pattern, command, re.IGNORECASE):
+            return (
+                f"security: '{label}' is not allowed.\n"
+                f"Use workspace-safe alternatives instead."
+            )
+
+    # Detect writes / redirects to paths outside workspace
+    if _STRICT and _WORKSPACE:
+        for m in _WRITE_OPS.finditer(command):
+            raw = m.group(1).strip().rstrip("'\"")
+            raw = raw.replace("$HOME", str(Path.home())).replace("~", str(Path.home()))
+            try:
+                target = Path(raw).expanduser().resolve()
+                if not _in_workspace(target):
+                    return (
+                        f"security: writing to '{raw}' is outside the workspace ({_WORKSPACE}).\n"
+                        f"Use write_file with a path inside the workspace instead."
+                    )
+            except Exception:
+                pass
+    return None
 
 # ── Browser singleton ─────────────────────────────────────────────────────────
 # Playwright browser/page kept alive across tool calls within a session.
@@ -213,6 +301,9 @@ def _run(cmd: list[str], timeout: int = 30) -> str:
 # ── Core ──────────────────────────────────────────────────────────────────────
 
 def tool_bash(command: str, timeout: int = 30) -> str:
+    risk = _bash_risk(command)
+    if risk:
+        return risk
     try:
         p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
         parts = []
@@ -236,6 +327,8 @@ def tool_read_file(path: str) -> str:
 
 
 def tool_write_file(path: str, content: str) -> str:
+    err = _guard_path(path, "write")
+    if err: return err
     try:
         p = Path(path).expanduser()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -248,7 +341,7 @@ def tool_write_file(path: str, content: str) -> str:
 # ── Mac system ────────────────────────────────────────────────────────────────
 
 def tool_screenshot(app: str = "", save_path: str = "", vision: bool = False) -> str | dict:
-    path = save_path or f"/tmp/wisp-{int(time.time())}.png"
+    path = save_path or str(workspace_path(f"screenshots/wisp-{int(time.time())}.png"))
     try:
         cmd = ["screencapture", "-x"]
         if app:
@@ -351,6 +444,8 @@ def tool_find_files(query: str, dir: str = "", limit: int = 20) -> str:
 
 
 def tool_move_file(src: str, dst: str) -> str:
+    err = _guard_path(dst, "move destination")
+    if err: return err
     try:
         s, d = Path(src).expanduser(), Path(dst).expanduser()
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -361,6 +456,8 @@ def tool_move_file(src: str, dst: str) -> str:
 
 
 def tool_copy_file(src: str, dst: str) -> str:
+    err = _guard_path(dst, "copy destination")
+    if err: return err
     try:
         s, d = Path(src).expanduser(), Path(dst).expanduser()
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -374,7 +471,9 @@ def tool_copy_file(src: str, dst: str) -> str:
 
 
 def tool_delete_file(path: str) -> str:
-    """Move to Trash via Finder (safe, reversible)."""
+    """Move to Trash — only allowed inside workspace."""
+    err = _guard_path(path, "delete")
+    if err: return err
     p = Path(path).expanduser().resolve()
     if not p.exists():
         return f"error: path not found: {p}"
@@ -440,7 +539,7 @@ def tool_browser_get_text(selector: str = "") -> str:
 
 
 def tool_browser_screenshot(save_path: str = "") -> str:
-    path = save_path or f"/tmp/wisp-browser-{int(time.time())}.png"
+    path = save_path or str(workspace_path(f"screenshots/wisp-browser-{int(time.time())}.png"))
     try:
         _get_page().screenshot(path=path)
         return f"ok: browser screenshot saved to {path}"

@@ -36,8 +36,15 @@ MAX_TOKENS = _cfg["model"]["max_tokens"]
 MAX_TURNS  = _cfg["agent"]["max_turns"]
 BASH_TO    = _cfg["agent"]["bash_timeout"]
 VISION     = _cfg.get("model", {}).get("vision", False)
+WORKSPACE  = _cfg["agent"].get("workspace", "~/wisp-workspace")
+STRICT     = _cfg["agent"].get("strict_workspace", True)
 
-SYSTEM_PROMPT = """You are a helpful assistant running on macOS (Apple Silicon). \
+# Initialise workspace sandbox
+from tools import init_workspace
+init_workspace(WORKSPACE, STRICT)
+
+_workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
+SYSTEM_PROMPT = f"""You are a helpful assistant running on macOS (Apple Silicon). \
 You have tools to complete tasks on the user's Mac.
 
 ## Shell environment
@@ -49,6 +56,12 @@ You have tools to complete tasks on the user's Mac.
   - File   : `stat -f "%z %N"` — NOT `stat --format`
   - Date   : `date -r <epoch>` — NOT `date -d`
   - sed    : `sed -i ''` — NOT `sed -i`
+
+## Workspace & security rules
+- ALL file outputs (write_file, screenshot, downloads) MUST go inside the workspace: {_workspace_abs}
+- NEVER write, move, copy, or delete files outside the workspace.
+- NEVER run destructive bash commands (rm -rf, sudo rm, dd, mkfs, chmod 777).
+- If a security error is returned, do NOT attempt to bypass it — report to the user instead.
 
 ## Tool usage rules
 - Prefer a single well-formed command over multiple probing attempts.

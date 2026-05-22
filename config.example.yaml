@@ -10,3 +10,5 @@ model:
 agent:
   max_turns: 20
   bash_timeout: 30
+  workspace: "~/wisp-workspace"     # all agent outputs go here
+  strict_workspace: true            # block writes/deletes outside workspace

@@ -205,9 +205,10 @@ def print_banner() -> None:
     row(f"{C.BOLD}{teal}▶ Tools  {dim_gray}({n_tools} total){C.RESET}")
     for cat, tools in _TOOLS_MAP:
         joined = ", ".join(tools)
-        max_w  = W - len(cat) - 4
+        # visible prefix = "  " + cat + ":" + "  " = len(cat) + 5
+        max_w  = W - len(cat) - 5
         if len(joined) > max_w:
-            joined = joined[:max_w - 1] + "…"
+            joined = joined[:max_w - 3] + "..."
         row(f"  {cat_c}{cat}:{C.RESET}  {val_c}{joined}{C.RESET}")
 
     row("")

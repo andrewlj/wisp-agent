@@ -124,6 +124,17 @@ _LOGO_COLORS = [
 ]
 _DASH_C = _rgb(0, 150, 175)
 
+# Panel width derived from logo — keeps box aligned with WISP-AGENT letters.
+# Logo visible width = indent(2) + letters + gaps, minus the "  │ " + " │" = 4
+# So inner panel width = logo_chars_width - 4
+_LOGO_LINE_W = (
+    len(_W[0]) + 2 + len(_I[0]) + 2 + len(_S[0]) + 2 + len(_P[0])   # WISP + gaps
+    + 2 + len(_DA[0]) + 2                                              # dash section
+    + len(_A[0]) + 2 + len(_G[0]) + 2 + len(_E[0]) + 2               # AGE + gaps
+    + len(_N[0]) + 2 + len(_T[0])                                      # NT
+)
+_PANEL_W = _LOGO_LINE_W - 4   # subtract "│ " prefix + " │" suffix
+
 _TOOLS_MAP = [
     ("core",    ["bash", "read_file", "write_file", "done"]),
     ("mac",     ["screenshot", "osascript", "clipboard_*", "open",
@@ -175,7 +186,7 @@ def print_banner() -> None:
     val_c    = _rgb(185, 185, 185)
     dim_gray = C.DIM + _rgb(115, 115, 115)
     meta_c   = _rgb(0, 165, 178)
-    W        = 72   # inner panel width
+    W        = _PANEL_W
 
     n_tools = len(SCHEMAS)
     from datetime import datetime

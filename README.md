@@ -92,11 +92,31 @@ wisp-agent/
 └── LICENSE
 ```
 
+## Development Log
+
+### v0.2 — Mac Automation & Tool Expansion
+- Added 14 new tools across 4 categories (mac system, file ops, network, browser)
+- Refactored tool definitions into `tools.py`, keeping `agent.py` focused on the main loop
+- Browser automation via Playwright (Chromium)
+- File search powered by macOS Spotlight (`mdfind`)
+- Safe file deletion (moves to Trash via Finder)
+
+### v0.1 — Core Agent + Interactive Experience
+- ReAct loop with streaming output (SSE)
+- Multi-turn conversation with in-memory history
+- Colored terminal output (ANSI)
+- Chinese input fix via `prompt_toolkit`
+- macOS-aware system prompt (BSD command syntax)
+- YAML config file (API key, model, params externalized)
+- Initial tool set: `bash`, `read_file`, `write_file`, `done`
+- Mac tools: `osascript`, `clipboard_read/write`, `screenshot`, `open`
+
 ## Roadmap
 
-- [ ] macOS automation tools (osascript, clipboard, notifications)
+- [ ] Toolset dynamic loading (on-demand, reduce token overhead at scale)
 - [ ] Session persistence (save/restore conversation history)
 - [ ] Context compression for long sessions
+- [ ] Vision support (screenshot analysis with VL models)
 - [ ] Multi-agent support
 
 ## License

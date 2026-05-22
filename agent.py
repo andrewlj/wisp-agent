@@ -29,6 +29,7 @@ def _load_config() -> dict:
 
 _cfg = _load_config()
 
+VERSION    = "0.3"
 BASE_URL   = _cfg["server"]["base_url"]
 API_KEY    = _cfg["server"]["api_key"]
 MODEL      = _cfg["model"]["name"]
@@ -92,6 +93,50 @@ class C:
 
 def c(color: str, text: str) -> str:
     return f"{color}{text}{C.RESET}"
+
+def _rgb(r: int, g: int, b: int) -> str:
+    return f"\033[38;2;{r};{g};{b}m"
+
+# ── Welcome banner ────────────────────────────────────────────────────────────
+
+_W = ["██╗    ██╗", "██║    ██║", "██║ █╗ ██║", "██║███╗██║", "╚███╔███╔╝", " ╚══╝╚══╝ "]
+_I = ["██╗",        "██║",        "██║",        "██║",        "██║",        "╚═╝"       ]
+_S = ["███████╗",   "██╔════╝",   "███████╗",   "╚════██║",   "███████║",   "╚══════╝"  ]
+_P = ["██████╗ ",   "██╔══██╗",   "██████╔╝",   "██╔═══╝ ",   "██║     ",   "╚═╝     "  ]
+
+_LOGO_COLORS = [
+    (  0, 255, 255), (  0, 235, 245), (  0, 215, 230),
+    (  0, 190, 210), (  0, 165, 190), (  0, 140, 170),
+]
+_SEP_COLOR = _rgb(0, 120, 140)
+_SEP       = f"{_SEP_COLOR}  ·  {C.RESET}"
+
+def print_banner() -> None:
+    print()
+    for row in range(6):
+        r, g, b = _LOGO_COLORS[row]
+        lc = f"\033[1m{_rgb(r, g, b)}"
+        print("  " + lc + _W[row] + C.RESET
+              + _SEP
+              + lc + _I[row] + C.RESET
+              + _SEP
+              + lc + _S[row] + C.RESET
+              + _SEP
+              + lc + _P[row] + C.RESET)
+
+    sep  = f"{_rgb(60, 60, 60)}  ·  {C.RESET}"
+    dim  = C.DIM
+    teal = _rgb(0, 200, 200)
+    gray = _rgb(160, 160, 160)
+    print()
+    print(f"  {dim}{gray}A lightweight local AI agent for macOS{C.RESET}"
+          f"{sep}{dim}{gray}v{VERSION}{C.RESET}")
+    print(f"  {dim}model: {teal}{MODEL}{C.RESET}"
+          f"{sep}{dim}tools: {teal}{len(__import__('tools').SCHEMAS)}{C.RESET}")
+    print()
+    print(f"  {_rgb(90,90,90)}reset{C.RESET}  clear history"
+          f"       {_rgb(90,90,90)}exit{C.RESET}  quit")
+    print()
 
 # ── Streaming API ─────────────────────────────────────────────────────────────
 
@@ -206,8 +251,7 @@ def run_agent(user_input: str, messages: list) -> None:
 # ── Interactive REPL ──────────────────────────────────────────────────────────
 
 def interactive() -> None:
-    print(c(C.BOLD, "wisp-agent"))
-    print(c(C.GRAY, "Commands: reset | exit\n"))
+    print_banner()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     session  = PromptSession(history=InMemoryHistory())
 

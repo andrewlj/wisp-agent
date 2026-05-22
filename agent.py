@@ -275,9 +275,55 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
 
     return full_content, [acc[i] for i in sorted(acc)]
 
+# ── Output helpers ────────────────────────────────────────────────────────────
+
+_TURN_WIDTH = _LOGO_LINE_W  # align turn separators with the banner
+
+def _print_turn_header(turn: int, max_turns: int) -> None:
+    label     = f" turn {turn}/{max_turns} "
+    bar_total = _TURN_WIDTH - len(label) - 2   # 2 for leading "  "
+    left_bar  = 4
+    right_bar = bar_total - left_bar
+    line = (f"{_rgb(0,80,95)}{'─'*left_bar}{C.RESET}"
+            f"{C.DIM}{_rgb(120,120,120)}{label}{C.RESET}"
+            f"{_rgb(0,80,95)}{'─'*right_bar}{C.RESET}")
+    print(f"\n  {line}")
+
+def _print_tool_call(name: str, args: dict) -> None:
+    name_col  = f"{C.BOLD}{_rgb(0,210,210)}{name}{C.RESET}"
+    args_str  = json.dumps(args, ensure_ascii=False)
+    max_args  = _TURN_WIDTH - len(name) - 10
+    if len(args_str) > max_args:
+        args_str = args_str[:max_args - 3] + "..."
+    print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}  {C.DIM}{_rgb(140,140,140)}{args_str}{C.RESET}")
+
+def _print_tool_result(result: str) -> None:
+    r = result.strip()
+    preview = r[:300] + ("..." if len(r) > 300 else "")
+    # Color by result type
+    if r.startswith("security:") or r.startswith("error:"):
+        color = _rgb(220, 80, 80)     # red — error
+    elif "[exit 0]" in r:
+        color = _rgb(80, 185, 120)    # green — success
+    elif r.startswith("ok:"):
+        color = _rgb(80, 185, 120)    # green — ok
+    elif any(f"[exit {i}]" in r for i in range(1, 256)):
+        color = _rgb(210, 170, 50)    # yellow — non-zero exit
+    else:
+        color = _rgb(130, 130, 130)   # gray — neutral
+    print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{preview}{C.RESET}")
+
+def _print_done(result_text: str) -> None:
+    bar   = f"{_rgb(0,170,100)}{'─' * _TURN_WIDTH}{C.RESET}"
+    check = f"{C.BOLD}{_rgb(0,230,130)}✓{C.RESET}"
+    text  = f"{C.BOLD}{_rgb(200,200,200)}{result_text}{C.RESET}"
+    print(f"\n  {bar}")
+    print(f"  {check}  {text}")
+    print(f"  {bar}")
+
 # ── Agent Turn ────────────────────────────────────────────────────────────────
 
-def run_turn(messages: list) -> bool:
+def run_turn(messages: list, turn: int = 0, max_turns: int = 0) -> bool:
     content, tool_calls = call_api_stream(messages)
 
     assistant_msg: dict = {"role": "assistant", "content": content}
@@ -296,16 +342,16 @@ def run_turn(messages: list) -> bool:
         name = tc["name"]
         args = json.loads(tc["arguments"])
 
-        print(c(C.YELLOW, f"  → {name}") + c(C.GRAY, f"({json.dumps(args, ensure_ascii=False)})"))
+        _print_tool_call(name, args)
 
         if name == "done":
-            print(c(C.GREEN, C.BOLD + f"\n✓ {args['result']}") + C.RESET)
+            _print_done(args.get("result", ""))
             return True
 
         result = dispatch(name, args, vision=VISION)
 
         if isinstance(result, dict) and "image_b64" in result:
-            print(c(C.GRAY, f"  ← {result['text']}") + c(C.CYAN, " [image]"))
+            _print_tool_result(result["text"] + " [image attached]")
             tool_content = [
                 {"type": "text", "text": result["text"]},
                 {"type": "image_url", "image_url": {
@@ -313,8 +359,7 @@ def run_turn(messages: list) -> bool:
                 }},
             ]
         else:
-            preview = str(result)[:300] + ("…" if len(str(result)) > 300 else "")
-            print(c(C.GRAY, f"  ← {preview}"))
+            _print_tool_result(str(result))
             tool_content = result
 
         messages.append({
@@ -328,11 +373,14 @@ def run_turn(messages: list) -> bool:
 def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
     messages.append({"role": "user", "content": user_input})
     for turn in range(1, MAX_TURNS + 1):
-        print(c(C.DIM, f"\n[turn {turn}]"))
-        if run_turn(messages):
+        _print_turn_header(turn, MAX_TURNS)
+        if run_turn(messages, turn, MAX_TURNS):
             break
     else:
-        print(c(C.RED, f"\n[stopped: {MAX_TURNS}-turn limit reached]"))
+        bar = f"{_rgb(200,80,80)}{'─' * _TURN_WIDTH}{C.RESET}"
+        print(f"\n  {bar}")
+        print(f"  {_rgb(200,80,80)}✗  stopped: {MAX_TURNS}-turn limit reached{C.RESET}")
+        print(f"  {bar}")
     # Auto-save session after every agent loop
     if session_id:
         _session.save(session_id, messages)

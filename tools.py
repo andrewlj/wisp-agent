@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import requests as _requests
+import task as _task
 
 # ── Workspace sandbox ─────────────────────────────────────────────────────────
 
@@ -276,6 +277,36 @@ SCHEMAS: list[dict] = [
 
     _fn("browser_close", "Close the Playwright browser.",
         {}, []),
+
+    # ── Task checkpoint ───────────────────────────────────────────────────────
+    _fn("task_init",
+        "Create a task plan with numbered steps. Call this at the start of any multi-step task "
+        "(3 or more steps). Returns a task_id you must pass to task_step_done/task_step_fail.",
+        {
+            "title": {"type": "string", "description": "Short title for the overall task"},
+            "steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Ordered list of step descriptions",
+            },
+        }, ["title", "steps"]),
+
+    _fn("task_step_done",
+        "Mark a step as completed. Call after each step finishes successfully.",
+        {
+            "task_id": {"type": "string", "description": "Task ID returned by task_init"},
+            "step_id": {"type": "integer", "description": "Step number (1-based)"},
+            "note":    {"type": "string",  "description": "Optional: brief note about what was done"},
+        }, ["task_id", "step_id"]),
+
+    _fn("task_step_fail",
+        "Mark a step as failed. Use when a step cannot be completed. "
+        "The task will be saved as 'interrupted' so it can be resumed later.",
+        {
+            "task_id": {"type": "string",  "description": "Task ID returned by task_init"},
+            "step_id": {"type": "integer", "description": "Step number (1-based)"},
+            "reason":  {"type": "string",  "description": "Why this step failed"},
+        }, ["task_id", "step_id"]),
 ]
 
 
@@ -555,6 +586,25 @@ def tool_browser_close() -> str:
         return f"error: {e}"
 
 
+# ── Task checkpoint ───────────────────────────────────────────────────────────
+
+def tool_task_init(title: str, steps: list[str]) -> str:
+    task = _task.create(title, steps)
+    total = len(task["steps"])
+    lines = [f"ok: task created — id: {task['id']}", f"Title: {title}", f"Steps ({total}):"]
+    for s in task["steps"]:
+        lines.append(f"  {s['id']}. {s['title']}")
+    return "\n".join(lines)
+
+
+def tool_task_step_done(task_id: str, step_id: int, note: str = "") -> str:
+    return _task.step_done(task_id, step_id, note)
+
+
+def tool_task_step_fail(task_id: str, step_id: int, reason: str = "") -> str:
+    return _task.step_fail(task_id, step_id, reason)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # DISPATCH
 # ═════════════════════════════════════════════════════════════════════════════
@@ -589,4 +639,8 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "browser_get_text":   return tool_browser_get_text(args.get("selector", ""))
         case "browser_screenshot": return tool_browser_screenshot(args.get("save_path", ""))
         case "browser_close":      return tool_browser_close()
+        # Task checkpoint
+        case "task_init":        return tool_task_init(args["title"], args["steps"])
+        case "task_step_done":   return tool_task_step_done(args["task_id"], args["step_id"], args.get("note", ""))
+        case "task_step_fail":   return tool_task_step_fail(args["task_id"], args["step_id"], args.get("reason", ""))
         case _:                  return f"error: unknown tool '{name}'"

@@ -15,6 +15,8 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 
 from tools import SCHEMAS, dispatch
+import session as _session
+import task as _task
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -77,6 +79,12 @@ You have tools to complete tasks on the user's Mac.
 - Use `http_get` / `http_post` for HTTP requests.
 - Use `browser_*` tools for interactive web automation (form fill, click, scrape).
 - Call `done` as soon as the task is fully complete.
+
+## Task tracking rules
+- For any task with 3 or more steps, ALWAYS call `task_init` first to declare the plan.
+- Call `task_step_done` immediately after each step completes successfully.
+- Call `task_step_fail` if a step cannot be completed, with a clear reason.
+- Never skip task tracking for multi-step tasks — it enables recovery if interrupted.
 """
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -239,7 +247,7 @@ def run_turn(messages: list) -> bool:
 
 # ── Agent Loop ────────────────────────────────────────────────────────────────
 
-def run_agent(user_input: str, messages: list) -> None:
+def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
     messages.append({"role": "user", "content": user_input})
     for turn in range(1, MAX_TURNS + 1):
         print(c(C.DIM, f"\n[turn {turn}]"))
@@ -247,36 +255,140 @@ def run_agent(user_input: str, messages: list) -> None:
             break
     else:
         print(c(C.RED, f"\n[stopped: {MAX_TURNS}-turn limit reached]"))
+    # Auto-save session after every agent loop
+    if session_id:
+        _session.save(session_id, messages)
+
+# ── REPL helpers ──────────────────────────────────────────────────────────────
+
+def _print_sessions() -> None:
+    sessions = _session.list_all()
+    if not sessions:
+        print(c(C.GRAY, "  no saved sessions"))
+        return
+    for s in sessions:
+        name  = s["name"] or c(C.GRAY, "(unnamed)")
+        ts    = s["updated"][:16].replace("T", " ")
+        msgs  = s["message_count"]
+        print(f"  {c(C.CYAN, s['id'])}  {name}  "
+              f"{c(C.GRAY, f'{msgs} messages · {ts}')}")
+
+def _print_tasks() -> None:
+    text = _task.format_list()
+    if text == "no saved tasks":
+        print(c(C.GRAY, "  no saved tasks"))
+    else:
+        print(text)
 
 # ── Interactive REPL ──────────────────────────────────────────────────────────
 
 def interactive() -> None:
-    print_banner()
+    # Start a new session
+    sid = _session.new_id()
+    _task.set_session_id(sid)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    session  = PromptSession(history=InMemoryHistory())
+
+    print_banner()
+
+    # Hint if there are saved sessions or tasks
+    n_sessions = _session.count()
+    if n_sessions:
+        print(c(C.GRAY, f"  {n_sessions} saved session{'s' if n_sessions > 1 else ''}  ·  "
+                        f"type 'sessions' to browse\n"))
+
+    repl = PromptSession(history=InMemoryHistory())
 
     while True:
         try:
-            user_input = session.prompt("▶ ", in_thread=True).strip()
+            user_input = repl.prompt("▶ ", in_thread=True).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
         if not user_input:
             continue
-        match user_input.lower():
-            case "exit" | "quit": break
-            case "reset":
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-                print(c(C.GRAY, "History cleared."))
-            case _:
-                run_agent(user_input, messages)
+
+        cmd = user_input.lower()
+
+        # ── built-in commands ──────────────────────────────────────────────
+        if cmd in ("exit", "quit"):
+            break
+
+        elif cmd == "sessions":
+            _print_sessions()
+
+        elif cmd.startswith("save"):
+            parts = user_input.split(maxsplit=1)
+            name  = parts[1].strip() if len(parts) > 1 else ""
+            _session.save(sid, messages, name=name)
+            print(c(C.GREEN, f"  saved as '{name or sid}'"))
+
+        elif cmd.startswith("load"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
+                print(c(C.RED, "  usage: load <session-id or name>"))
+                continue
+            key  = parts[1].strip()
+            data = _session.load(key)
+            if data is None:
+                print(c(C.RED, f"  session not found: {key}"))
+            else:
+                messages = data["messages"]
+                sid      = data["id"]
+                _task.set_session_id(sid)
+                print(c(C.GREEN,
+                        f"  loaded '{data.get('name') or sid}'  "
+                        f"({data['message_count']} messages)"))
+
+        elif cmd == "new":
+            _session.save(sid, messages)
+            sid      = _session.new_id()
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            _task.set_session_id(sid)
+            _task.set_current_id(None)
+            print(c(C.GRAY, "  new session started"))
+
+        elif cmd == "reset":
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            _task.set_current_id(None)
+            print(c(C.GRAY, "  history cleared"))
+
+        elif cmd == "tasks":
+            _print_tasks()
+
+        elif cmd.startswith("resume"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
+                print(c(C.RED, "  usage: resume <task-id>"))
+                continue
+            tid  = parts[1].strip()
+            tdata = _task.load(tid)
+            if tdata is None:
+                print(c(C.RED, f"  task not found: {tid}"))
+                continue
+            # Try to restore linked session
+            if tdata.get("session_id"):
+                sdata = _session.load(tdata["session_id"])
+                if sdata:
+                    messages = sdata["messages"]
+                    sid      = sdata["id"]
+                    _task.set_session_id(sid)
+                    print(c(C.GREEN, f"  restored session: {sid}"))
+            # Inject task resume context into messages
+            context = _task.format_resume_context(tdata)
+            messages.append({"role": "system", "content": context})
+            _task.set_current_id(tid)
+            print(c(C.CYAN, context))
+
+        # ── agent turn ─────────────────────────────────────────────────────
+        else:
+            run_agent(user_input, messages, session_id=sid)
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        task = " ".join(sys.argv[1:]).strip()
+        oneshot_task = " ".join(sys.argv[1:]).strip()
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        run_agent(task, messages)
+        run_agent(oneshot_task, messages)
     else:
         interactive()

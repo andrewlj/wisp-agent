@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Local Agent - Layer 2A
-Adds: streaming output, multi-turn interactive mode, colored terminal.
-Dependencies: requests, pyyaml
+wisp-agent - Layer 2A
+A lightweight local AI agent. Streaming, multi-turn, colored terminal.
+Dependencies: requests, pyyaml, prompt_toolkit
 """
 
 import json

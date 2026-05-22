@@ -1,6 +1,6 @@
-# local-agent
+# wisp-agent
 
-A lightweight local AI agent running on macOS, powered by a local LLM via [mlx-lm](https://github.com/ml-explore/mlx-lm). No cloud API dependencies — everything runs on your machine.
+A lightweight local AI agent powered by a local LLM via [mlx-lm](https://github.com/ml-explore/mlx-lm). No cloud API dependencies — everything runs on your machine.
 
 ## Features
 
@@ -18,9 +18,11 @@ A lightweight local AI agent running on macOS, powered by a local LLM via [mlx-l
 
 ## Setup
 
-**1. Install dependencies**
+**1. Clone and install dependencies**
 
 ```bash
+git clone https://github.com/your-username/wisp-agent.git
+cd wisp-agent
 pip install -r requirements.txt
 ```
 
@@ -74,7 +76,7 @@ python agent.py "帮我统计桌面上有多少个文件"
 
 | Tool | Description |
 |------|-------------|
-| `bash` | Run any shell command on macOS |
+| `bash` | Run any shell command |
 | `read_file` | Read file contents |
 | `write_file` | Write file contents |
 | `done` | Signal task completion |
@@ -82,7 +84,7 @@ python agent.py "帮我统计桌面上有多少个文件"
 ## Project structure
 
 ```
-local-agent/
+wisp-agent/
 ├── agent.py              # Main agent code
 ├── config.yaml           # Your local config (git-ignored)
 ├── config.example.yaml   # Config template

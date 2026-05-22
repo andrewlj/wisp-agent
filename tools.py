@@ -22,18 +22,15 @@ _pw   = None
 _browser = None
 _page    = None
 
-try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-
-
 def _get_page():
     global _pw, _browser, _page
     if _page is None:
-        if not PLAYWRIGHT_AVAILABLE:
-            raise RuntimeError("playwright not installed. Run: pip install playwright && playwright install chromium")
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise RuntimeError(
+                "playwright not installed. Run: pip install playwright && playwright install chromium"
+            )
         _pw      = sync_playwright().start()
         _browser = _pw.chromium.launch(headless=False)
         _page    = _browser.new_page()

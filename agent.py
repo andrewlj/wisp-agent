@@ -11,7 +11,7 @@ from pathlib import Path
 
 import requests
 import yaml
-from prompt_toolkit import prompt
+from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 
 from tools import SCHEMAS, dispatch
@@ -196,11 +196,11 @@ def interactive() -> None:
     print(c(C.BOLD, "wisp-agent"))
     print(c(C.GRAY, "Commands: reset | exit\n"))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    history  = InMemoryHistory()
+    session  = PromptSession(history=InMemoryHistory())
 
     while True:
         try:
-            user_input = prompt("▶ ", history=history).strip()
+            user_input = session.prompt("▶ ", in_thread=True).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break

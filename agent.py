@@ -48,9 +48,11 @@ BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
 # Initialise workspace sandbox, browser timeout, and briefing LLM config
 from tools import init_workspace, init_browser_timeout
 from briefing import init_briefing
+import knowledge as _knowledge
 init_workspace(WORKSPACE, STRICT)
 init_browser_timeout(BROWSER_TO)
 init_briefing(BASE_URL, API_KEY, MODEL, WORKSPACE)
+_knowledge.init_knowledge(WORKSPACE)
 
 _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
 
@@ -99,7 +101,12 @@ def _build_system_prompt(profile: dict) -> str:
         parts.append("## 工具使用规则（用户配置）\n"
                      + "\n".join(f"- {b}" for b in behaviors))
 
-    # 3. Static environment rules
+    # 3. Tool knowledge base (learned rules from past sessions)
+    kb = _knowledge.load()
+    if kb:
+        parts.append(kb)
+
+    # 4. Static environment rules
     parts.append(f"""\
 ## 运行环境
 You are running on macOS (Apple Silicon). Shell: zsh. Python: python3.11. Package manager: Homebrew.
@@ -129,6 +136,11 @@ Always use macOS/BSD command syntax — NOT Linux/GNU:
 ## Task tracking
 - For any task with 3 or more steps, ALWAYS call `task_init` first.
 - Call `task_step_done` after each step; `task_step_fail` if a step cannot complete.
+
+## Learning
+- When the user corrects your approach or points out a mistake, IMMEDIATELY call `learn()`
+  before continuing. Do not just apologise — record the correct rule.
+- Rule format: one sentence — "完成[任务类型]应该用[工具]，不用[错误工具]"
 """)
 
     return "\n\n".join(parts)
@@ -272,6 +284,7 @@ _TOOLS_MAP = [
                  "browser_get_text", "browser_screenshot", "browser_close"]),
     ("task",    ["task_init", "task_step_done", "task_step_fail"]),
     ("news",    ["daily_briefing"]),
+    ("learn",   ["learn"]),
 ]
 
 def _rpad(s: str, width: int) -> str:
@@ -624,6 +637,91 @@ def _maybe_compress(messages: list) -> None:
           f"context compressed: {before} → {after} messages{C.RESET}")
 
 
+# ── Post-task Reflection ──────────────────────────────────────────────────────
+
+_CORRECTION_SIGNALS = ["不对", "不是", "应该", "错了", "不要", "换成", "改用", "别用",
+                       "wrong", "incorrect", "should use", "don't use", "use instead"]
+
+def _post_task_reflect(messages: list) -> None:
+    """Scan the completed task for failures/corrections; write learned rules.
+
+    Runs a lightweight LLM call (json_mode, max 256 tokens) to extract
+    up to 3 generalised tool-usage rules and appends them to knowledge.md.
+    Silent on any error — never interrupts the user.
+    """
+    failures:    list[str] = []
+    corrections: list[str] = []
+    prev_role = ""
+
+    for msg in messages[1:]:   # skip system prompt
+        role    = msg.get("role", "")
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        text = str(content).strip()
+
+        if role == "tool":
+            if (text.startswith("error:") or text.startswith("security:")
+                    or any(f"[exit {i}]" in text for i in range(1, 10))):
+                failures.append(text[:200])
+        elif role == "user" and prev_role == "tool":
+            if any(s in text for s in _CORRECTION_SIGNALS):
+                corrections.append(text[:200])
+        prev_role = role
+
+    if not failures and not corrections:
+        return
+
+    # Build a compact reflection prompt
+    excerpts: list[str] = []
+    if failures:
+        excerpts.append("工具执行失败：\n" + "\n".join(f"- {f}" for f in failures[:3]))
+    if corrections:
+        excerpts.append("用户纠正：\n" + "\n".join(f"- {c}" for c in corrections[:3]))
+
+    prompt = (
+        "以下是刚完成的任务中出现的失败或用户纠正：\n\n"
+        + "\n\n".join(excerpts)
+        + "\n\n请总结出可以避免类似问题的工具使用规则（最多3条）。"
+        "\n规则必须一句话，格式：'完成[任务类型]应该用[工具/方法]，不用[错误方法]'"
+        "\n只提取可泛化的规则，跳过过于具体的单次事件。"
+        '\n返回 JSON：{"rules":[{"rule":"...","category":"browser|bash|files|general"}]}'
+    )
+
+    try:
+        resp = requests.post(
+            BASE_URL,
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={
+                "model":           MODEL,
+                "messages":        [{"role": "user", "content": prompt}],
+                "max_tokens":      256,
+                "stream":          False,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        import json as _json
+        data  = _json.loads(resp.json()["choices"][0]["message"]["content"])
+        rules = data.get("rules", [])
+    except Exception:
+        return
+
+    written = 0
+    for r in rules[:3]:
+        rule_text = (r.get("rule") or "").strip()
+        category  = (r.get("category") or "general").strip()
+        if rule_text:
+            result = _knowledge.append_rule(rule_text, category)
+            if "rule added" in result:
+                written += 1
+
+    if written:
+        print(f"\n  {_rgb(90,60,180)}◆{C.RESET} {C.DIM}{_rgb(150,120,220)}"
+              f"learned {written} rule{'s' if written > 1 else ''} → knowledge.md{C.RESET}")
+
+
 # ── Agent Loop ────────────────────────────────────────────────────────────────
 
 def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
@@ -638,6 +736,8 @@ def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
         print(f"\n  {bar}")
         print(f"  {_rgb(200,80,80)}✗  stopped: {MAX_TURNS}-turn limit reached{C.RESET}")
         print(f"  {bar}")
+    # Post-task reflection: learn from failures and corrections
+    _post_task_reflect(messages)
     # Auto-save session after every agent loop
     if session_id:
         _session.save(session_id, messages)
@@ -765,6 +865,13 @@ def interactive() -> None:
                         _task.set_current_id(arg)
                         print(c(C.CYAN, context))
 
+            elif cmd == "knowledge":
+                kb = _knowledge.load()
+                if kb:
+                    print(c(C.GRAY, kb))
+                else:
+                    print(c(C.GRAY, "  knowledge base is empty"))
+
             elif cmd == "debug":
                 global _DEBUG
                 _DEBUG = not _DEBUG
@@ -782,6 +889,7 @@ def interactive() -> None:
                     "  /reset             clear current history\n"
                     "  /tasks             list saved tasks\n"
                     "  /resume <task-id>  resume an interrupted task\n"
+                    "  /knowledge         show learned tool usage rules\n"
                     "  /debug             toggle verbose debug output\n"
                     "  /exit              quit wisp"
                 ))

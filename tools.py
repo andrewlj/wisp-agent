@@ -334,6 +334,26 @@ SCHEMAS: list[dict] = [
             "step_id": {"type": "integer", "description": "Step number (1-based)"},
             "reason":  {"type": "string",  "description": "Why this step failed"},
         }, ["task_id", "step_id"]),
+
+    _fn("learn",
+        "Record a tool usage rule discovered during this task — e.g. when the user "
+        "corrects a mistake or a better approach is found. Call this immediately when "
+        "you recognise a correction. The rule is saved to knowledge.md and will apply "
+        "to all future sessions.",
+        {
+            "rule": {
+                "type": "string",
+                "description": (
+                    "One concise sentence: '完成[任务类型]应该用[工具/方法]，不用[错误方法]'. "
+                    "Must mention a specific tool name."
+                ),
+            },
+            "category": {
+                "type": "string",
+                "description": "Tool category this rule belongs to.",
+                "enum": ["browser", "bash", "files", "general"],
+            },
+        }, ["rule", "category"]),
 ]
 
 
@@ -646,6 +666,11 @@ def tool_task_step_fail(task_id: str, step_id: int, reason: str = "") -> str:
     return _task.step_fail(task_id, step_id, reason)
 
 
+def tool_learn(rule: str, category: str = "general") -> str:
+    import knowledge as _knowledge
+    return _knowledge.append_rule(rule, category)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # DISPATCH
 # ═════════════════════════════════════════════════════════════════════════════
@@ -688,4 +713,5 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "task_init":        return tool_task_init(args["title"], args["steps"])
         case "task_step_done":   return tool_task_step_done(args["task_id"], args["step_id"], args.get("note", ""))
         case "task_step_fail":   return tool_task_step_fail(args["task_id"], args["step_id"], args.get("reason", ""))
+        case "learn":            return tool_learn(args["rule"], args.get("category", "general"))
         case _:                  return f"error: unknown tool '{name}'"

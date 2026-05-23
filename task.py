@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-_TASKS_DIR = Path.home() / ".wisp" / "tasks"
+_TASKS_DIR = Path.home() / "wisp" / "tasks"
 
 _current_task_id:     str | None = None
 _current_session_id:  str | None = None

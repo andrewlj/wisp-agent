@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-_SESSIONS_DIR = Path.home() / ".wisp" / "sessions"
+_SESSIONS_DIR = Path.home() / "wisp" / "sessions"
 
 
 def _ensure() -> None:

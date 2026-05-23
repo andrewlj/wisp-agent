@@ -497,66 +497,15 @@ def _is_english(text: str) -> bool:
 _TRANSLATE_BATCH = 3
 
 
-def _translate_batch(items: list[dict]) -> list[dict]:
-    n        = len(items)
-    fallback = [{"title_cn": item["title"], "summary_cn": item.get("description", "")}
-                for item in items]
-    if n == 0:
-        return []
-
-    parts = []
-    for i, item in enumerate(items, 1):
-        desc = (item.get("description") or "")[:300]
-        parts.append(f'{i}. Title: {item["title"]}\n   Abstract: {desc or "(none)"}')
-
+def _translate_one(item: dict) -> dict:
+    """Translate + summarise a single item. Used for no-description items and retries."""
+    desc = (item.get("description") or "").strip()
     prompt = (
-        "You are a professional news editor. For each numbered item, translate the "
-        "title to Simplified Chinese and write a 2–3 sentence Chinese summary "
-        f"(80–150 characters).\n\n"
-        f"IMPORTANT: return EXACTLY {n} objects in the array — one per input, in order.\n"
-        'JSON format: {"items":[{"title_cn":"...","summary_cn":"..."}]}\n\n'
-        + "\n\n".join(parts)
-    )
-
-    try:
-        raw  = _call_llm(prompt, max_tokens=600, json_mode=True)
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("results") or list(data.values())[0]
-        if not isinstance(data, list):
-            raise ValueError(f"unexpected shape: {type(data)}")
-
-        result = []
-        for i, item in enumerate(items):
-            entry      = data[i] if i < len(data) and isinstance(data[i], dict) else {}
-            title_cn   = str(entry.get("title_cn")   or "").strip()
-            summary_cn = str(entry.get("summary_cn") or "").strip()
-            # Title: fall back to original English if translation failed or came back English
-            if not title_cn or _is_english(title_cn):
-                title_cn = item["title"]
-            # Summary: degenerate or English output → use "" rather than showing English text
-            if not summary_cn or re.match(r"^[\d\s.,/%-]+$", summary_cn) or len(summary_cn) < 15:
-                summary_cn = ""
-            elif _is_english(summary_cn):
-                summary_cn = ""
-            result.append({"title_cn": title_cn, "summary_cn": summary_cn})
-
-        while len(result) < n:
-            result.append(fallback[len(result)])
-        return result
-
-    except Exception as e:
-        print(f"      ✗ batch translate error: {e}")
-        return fallback
-
-
-def _retry_single(item: dict) -> dict:
-    """Force-translate one item that the batch call failed on."""
-    prompt = (
-        "将以下英文新闻标题和摘要翻译成简体中文，用2-3句话写中文摘要（80-150字）。\n"
+        "请将以下英文新闻标题翻译成简体中文，并用2-3句话写一段简体中文摘要（80-150字）。\n"
+        "必须全部输出简体中文，禁止出现英文。\n"
         "只输出JSON，格式：{\"title_cn\": \"...\", \"summary_cn\": \"...\"}\n\n"
         f"标题：{item['title']}\n"
-        f"摘要：{(item.get('description') or '（无）')[:300]}"
+        f"内容：{desc[:300] if desc else '（无正文摘要，请根据标题推断）'}"
     )
     try:
         raw  = _call_llm(prompt, max_tokens=300, json_mode=True)
@@ -568,23 +517,91 @@ def _retry_single(item: dict) -> dict:
         if not summary_cn or _is_english(summary_cn) or len(summary_cn) < 10:
             summary_cn = ""
         return {"title_cn": title_cn, "summary_cn": summary_cn}
-    except Exception as e:
-        print(f"      ✗ retry error: {e}")
+    except Exception:
         return {"title_cn": item["title"], "summary_cn": ""}
 
 
+def _translate_batch(items: list[dict]) -> list[dict]:
+    """Translate + summarise a batch of items that all have descriptions."""
+    n = len(items)
+    if n == 0:
+        return []
+
+    parts = []
+    for i, item in enumerate(items, 1):
+        desc = (item.get("description") or "")[:300]
+        parts.append(f'{i}. 标题: {item["title"]}\n   内容: {desc}')
+
+    prompt = (
+        f"将以下{n}条英文新闻翻译成简体中文，每条写2-3句中文摘要（80-150字）。\n"
+        "全部输出简体中文，禁止出现英文。\n"
+        f"必须返回恰好{n}个对象。\n"
+        '格式：{"items":[{"title_cn":"...","summary_cn":"..."}]}\n\n'
+        + "\n\n".join(parts)
+    )
+
+    try:
+        raw  = _call_llm(prompt, max_tokens=300 * n, json_mode=True)
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = data.get("items") or data.get("results") or list(data.values())[0]
+        if not isinstance(data, list):
+            raise ValueError(f"unexpected shape: {type(data)}")
+
+        result = []
+        for i, item in enumerate(items):
+            entry      = data[i] if i < len(data) and isinstance(data[i], dict) else {}
+            title_cn   = str(entry.get("title_cn")   or "").strip()
+            summary_cn = str(entry.get("summary_cn") or "").strip()
+            if not title_cn or _is_english(title_cn):
+                title_cn = item["title"]
+            if not summary_cn or re.match(r"^[\d\s.,/%-]+$", summary_cn) or len(summary_cn) < 15:
+                summary_cn = ""
+            elif _is_english(summary_cn):
+                summary_cn = ""
+            result.append({"title_cn": title_cn, "summary_cn": summary_cn})
+
+        while len(result) < n:
+            result.append({"title_cn": items[len(result)]["title"], "summary_cn": ""})
+        return result
+
+    except Exception as e:
+        print(f"      ✗ batch translate error: {e}")
+        return [{"title_cn": it["title"], "summary_cn": ""} for it in items]
+
+
 def _translate_and_summarize(items: list[dict]) -> list[dict]:
+    """Translate all items: batch for items with description, single call for the rest."""
     if not items:
         return []
-    result = []
-    for i in range(0, len(items), _TRANSLATE_BATCH):
-        result.extend(_translate_batch(items[i: i + _TRANSLATE_BATCH]))
 
-    # Retry pass: fix items still in English or with empty summary
+    # Split: items with meaningful description go through batch; others get individual calls
+    has_desc  = [bool((it.get("description") or "").strip()) for it in items]
+    with_desc = [it for it, h in zip(items, has_desc) if h]
+    no_desc   = [it for it, h in zip(items, has_desc) if not h]
+
+    # Batch translate items that have description text
+    batch_results: list[dict] = []
+    for i in range(0, len(with_desc), _TRANSLATE_BATCH):
+        batch_results.extend(_translate_batch(with_desc[i: i + _TRANSLATE_BATCH]))
+
+    # Single-call translate items without description (title-only inference)
+    single_results = [_translate_one(it) for it in no_desc]
+
+    # Reassemble in original order
+    result   = [None] * len(items)
+    b_idx = s_idx = 0
+    for i, h in enumerate(has_desc):
+        if h:
+            result[i] = batch_results[b_idx]; b_idx += 1
+        else:
+            result[i] = single_results[s_idx]; s_idx += 1
+
+    # Silent retry pass: fix any remaining English titles or empty summaries
     for i, (item, tr) in enumerate(zip(items, result)):
         if _is_english(tr["title_cn"]) or not tr["summary_cn"]:
-            print(f"      ↺ retry: {item['title'][:55]}")
-            result[i] = _retry_single(item)
+            result[i] = _translate_one(item)
+
     return result
 
 

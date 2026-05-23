@@ -146,6 +146,9 @@ _ICT_R_KW = {
     "paper", "dataset", "open source", "open-source", "weights",
     "architecture", "algorithm", "neural", "transformer", "diffusion",
     "multimodal", "vision", "language model",
+    # broader science / non-AI research
+    "genetic", "biology", "protein", "climate", "drug", "medical", "physics",
+    "discovery", "experiment", "laboratory", "innovation",
 }
 # Must appear in title for non-trusted sources
 _ICT_R_TITLE_REQUIRED = {
@@ -153,14 +156,15 @@ _ICT_R_TITLE_REQUIRED = {
     "robotics", "benchmark", "dataset", "inference", "training",
     "llm", "model", "open-source", "open source", "weights", "algorithm",
     "neural", "transformer", "diffusion", "multimodal", "release",
+    "genetic", "protein", "discovery", "experiment",
 }
-# Business signals that disqualify a research article
-_ICT_R_BIZ_EXCL = {
-    "funding", "ipo", "acquisition", "merger", "earnings", "revenue",
-    "lawsuit", "antitrust", "layoff", "stock", "valuation", "quarterly",
-    "partnership", "deal", "advertising", "marketing", "enterprise sales",
-    "promo code", "coupon", "gift guide", "shopping", "deals",
-    "review", "hands-on", "preorder", "sale", "discount",
+# Hard commercial signals — reject unconditionally
+# Note: "review" intentionally excluded — "MIT Technology Review" is a source name
+_ICT_R_STRONG_BIZ_EXCL = {
+    "earnings", "ipo", "funding round", "acquisition", "merger", "layoff",
+    "lawsuit", "antitrust", "quarterly earnings", "annual report",
+    "promo code", "coupon", "gift guide", "shopping", "hands-on",
+    "preorder", "discount",
 }
 
 _ICT_B_KW = {
@@ -331,14 +335,14 @@ def _item_text(item: dict) -> str:
 def _keep_ict_research(item: dict) -> bool:
     text  = _item_text(item)
     title = item.get("title", "").lower()
-    # Reject anything with business/commercial signals
-    if _has_any(text, _ICT_R_BIZ_EXCL):
+    # Always reject hard commercial/lifestyle signals
+    if _has_any(text, _ICT_R_STRONG_BIZ_EXCL):
         return False
-    # Trusted research outlets: pass if any research keyword present
+    # Trusted research outlets: pass everything without strong biz signals
     if item.get("source") in _ICT_R_TRUSTED:
-        return _count(text, _ICT_R_KW) >= 1
-    # General tech outlets: require research signal in the title specifically
-    return _has_any(title, _ICT_R_TITLE_REQUIRED) and _count(text, _ICT_R_KW) >= 2
+        return True
+    # General tech outlets: require a research/science signal in the title
+    return _has_any(title, _ICT_R_TITLE_REQUIRED) and _count(text, _ICT_R_KW) >= 1
 
 
 def _keep_ict_business(item: dict) -> bool:
@@ -496,11 +500,17 @@ def _fetch_page(page_url: str, source_name: str, url_pattern: str = "") -> list[
 
 # ── Section fetcher ───────────────────────────────────────────────────────────
 
-def _fetch_section(section: str, history_keys: set[str]) -> list[dict]:
-    """Collect, filter, and deduplicate candidates for one section."""
-    domains   = _SECTION_DOMAINS[section]
-    seen: set[str] = set()
-    candidates: list[dict] = []
+def _fetch_section(section: str, history_keys: set[str],
+                   per_source_cap: int = _MAX_ITEMS) -> list[dict]:
+    """Collect, filter, and deduplicate candidates for one section.
+
+    per_source_cap: max candidates taken from any single source outlet,
+    preventing one prolific feed from crowding out the rest.
+    """
+    domains      = _SECTION_DOMAINS[section]
+    seen: set[str]          = set()
+    source_counts: dict[str, int] = {}
+    candidates: list[dict]  = []
 
     for src in _SOURCES.get(section, []):
         host_hint   = src["hostname"]
@@ -524,10 +534,14 @@ def _fetch_section(section: str, history_keys: set[str]) -> list[dict]:
             label = _domain_source(item["hostname"], domains)
             if not label:
                 continue
+            # Per-source cap: stop taking more from this outlet once reached
+            if source_counts.get(label, 0) >= per_source_cap:
+                continue
             key = _dedup_key(url_clean)
             if key in seen or key in history_keys:
                 continue
             seen.add(key)
+            source_counts[label] = source_counts.get(label, 0) + 1
             candidates.append({
                 **item,
                 "title":       (item["title"] or label).strip(),
@@ -720,10 +734,12 @@ def _translate_and_summarize(items: list[dict]) -> list[dict]:
         result = []
         for i, item in enumerate(items):
             entry = data[i] if i < len(data) and isinstance(data[i], dict) else {}
-            result.append({
-                "title_cn":   str(entry.get("title_cn") or "").strip() or item["title"],
-                "summary_cn": str(entry.get("summary_cn") or "").strip() or item.get("description", ""),
-            })
+            title_cn   = str(entry.get("title_cn")   or "").strip() or item["title"]
+            summary_cn = str(entry.get("summary_cn") or "").strip()
+            # Reject degenerate summaries: pure numbers or too short
+            if not summary_cn or re.match(r"^[\d\s.,/%-]+$", summary_cn) or len(summary_cn) < 15:
+                summary_cn = item.get("description", "")
+            result.append({"title_cn": title_cn, "summary_cn": summary_cn})
         return result
 
     except Exception as e:
@@ -839,13 +855,20 @@ def generate_report(
     # ── 1. history dedup ──────────────────────────────────────────────────────
     history_keys = _load_history_keys()
 
+    # Per-source cap per section: prevents one prolific feed from dominating.
+    # ict_research has 6 sources → cap 2 each so all sources get represented.
+    _per_source_cap = {
+        "ict_research": 2,
+    }
+
     # ── 2. fetch all sections (isolated per-section) ──────────────────────────
     sections_data: dict[str, list[dict]] = {}
     for section in active:
         label = SECTION_LABELS[section]
         print(f"  → {label}")
         try:
-            items = _fetch_section(section, history_keys)
+            cap   = _per_source_cap.get(section, _MAX_ITEMS)
+            items = _fetch_section(section, history_keys, per_source_cap=cap)
             print(f"     {len(items)} articles")
         except Exception as e:
             print(f"     ✗ fetch error: {e}")

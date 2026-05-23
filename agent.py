@@ -53,45 +53,85 @@ init_browser_timeout(BROWSER_TO)
 init_briefing(BASE_URL, API_KEY, MODEL, WORKSPACE)
 
 _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
-SYSTEM_PROMPT = f"""You are a helpful assistant running on macOS (Apple Silicon). \
-You have tools to complete tasks on the user's Mac.
 
-## Shell environment
-- Shell: zsh. Python: python3.11. Package manager: Homebrew (brew).
-- Always use macOS/BSD command syntax — NOT Linux/GNU syntax. Key differences:
-  - Memory : `vm_stat`, `sysctl hw.memsize` — NOT `free`
-  - Disk   : `df -h`, `diskutil` — NOT `lsblk`
-  - Process: `ps aux` or `ps -eo pid,rss,comm` (BSD flags, no `--` prefix)
-  - File   : `stat -f "%z %N"` — NOT `stat --format`
-  - Date   : `date -r <epoch>` — NOT `date -d`
-  - sed    : `sed -i ''` — NOT `sed -i`
+# ── Soul & Profile ────────────────────────────────────────────────────────────
 
-## Workspace & security rules
-- ALL file outputs (write_file, screenshot, downloads) MUST go inside the workspace: {_workspace_abs}
+_SOUL_PATH    = Path(__file__).parent / "soul.md"
+_PROFILE_PATH = Path(__file__).parent / "profile.yaml"
+
+def _load_soul() -> str:
+    if _SOUL_PATH.exists():
+        return _SOUL_PATH.read_text().strip()
+    return ""
+
+def _load_profile() -> dict:
+    if not _PROFILE_PATH.exists():
+        return {}
+    with open(_PROFILE_PATH) as f:
+        return yaml.safe_load(f) or {}
+
+def _build_system_prompt(profile: dict) -> str:
+    """Assemble system prompt: soul + profile + static environment rules."""
+    parts = []
+
+    # 1. Soul — core identity and constraints
+    soul = _load_soul()
+    if soul:
+        parts.append(soul)
+
+    # 2. Profile — agent persona + user context + behaviors
+    agent    = profile.get("agent", {})
+    user     = profile.get("user", {})
+    persona  = (agent.get("persona") or "").strip()
+    if persona:
+        parts.append(f"## 性格与风格\n{persona}")
+
+    user_lines = []
+    if user.get("name"):     user_lines.append(f"用户称呼：{user['name']}")
+    if user.get("language"): user_lines.append(f"首选语言：{user['language']}")
+    if user.get("location"): user_lines.append(f"所在地：{user['location']}")
+    if user.get("bio"):      user_lines.append(f"背景：{user['bio']}")
+    if user_lines:
+        parts.append("## 用户信息\n" + "\n".join(f"- {l}" for l in user_lines))
+
+    behaviors = profile.get("behaviors", [])
+    if behaviors:
+        parts.append("## 工具使用规则（用户配置）\n"
+                     + "\n".join(f"- {b}" for b in behaviors))
+
+    # 3. Static environment rules
+    parts.append(f"""\
+## 运行环境
+You are running on macOS (Apple Silicon). Shell: zsh. Python: python3.11. Package manager: Homebrew.
+Always use macOS/BSD command syntax — NOT Linux/GNU:
+- Memory : `vm_stat`, `sysctl hw.memsize`
+- Disk   : `df -h`, `diskutil`
+- Process: `ps aux` (BSD flags, no `--` prefix)
+- File   : `stat -f "%z %N"`
+- Date   : `date -r <epoch>`
+- sed    : `sed -i ''`
+
+## Workspace & security
+- ALL file outputs MUST go inside: {_workspace_abs}
 - NEVER write, move, copy, or delete files outside the workspace.
-- NEVER run destructive bash commands (rm -rf, sudo rm, dd, mkfs, chmod 777).
-- If a security error is returned, do NOT attempt to bypass it — report to the user instead.
+- NEVER run destructive commands (rm -rf, sudo rm, dd, mkfs, chmod 777).
+- NEVER send user data to external services autonomously.
+- If a security error is returned, report it — do NOT bypass.
 
-## Tool usage rules
+## Tool usage
 - Prefer a single well-formed command over multiple probing attempts.
 - If a command fails, read the error and fix it before retrying.
 - Use `read_file` / `write_file` for file content; `bash` for everything else.
-- Use `osascript` for notifications, app control, dialogs — not bash.
-- Use `clipboard_read` / `clipboard_write` for clipboard.
-- Use `screenshot` to capture the screen or a specific app window.
-- Use `list_apps` / `focus_app` / `quit_app` to manage running applications.
-- Use `find_files` to search by name, extension, or keyword (Spotlight-powered).
-- Use `move_file` / `copy_file` / `delete_file` for file operations.
-- Use `http_get` / `http_post` for HTTP requests.
-- Use `browser_*` tools for interactive web automation (form fill, click, scrape).
+- Use `osascript` for notifications, app control, dialogs.
+- Use `browser_*` for interactive web tasks (flights, forms, logins) — not `http_get`.
 - Call `done` as soon as the task is fully complete.
 
-## Task tracking rules
-- For any task with 3 or more steps, ALWAYS call `task_init` first to declare the plan.
-- Call `task_step_done` immediately after each step completes successfully.
-- Call `task_step_fail` if a step cannot be completed, with a clear reason.
-- Never skip task tracking for multi-step tasks — it enables recovery if interrupted.
-"""
+## Task tracking
+- For any task with 3 or more steps, ALWAYS call `task_init` first.
+- Call `task_step_done` after each step; `task_step_fail` if a step cannot complete.
+""")
+
+    return "\n\n".join(parts)
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -110,6 +150,87 @@ def c(color: str, text: str) -> str:
 
 def _rgb(r: int, g: int, b: int) -> str:
     return f"\033[38;2;{r};{g};{b}m"
+
+# ── Onboarding ────────────────────────────────────────────────────────────────
+
+def _detect_timezone() -> str:
+    """Auto-detect macOS timezone from /etc/localtime symlink."""
+    import subprocess
+    try:
+        out = subprocess.check_output(["readlink", "/etc/localtime"],
+                                      text=True).strip()
+        if "zoneinfo/" in out:
+            return out.split("zoneinfo/")[-1]
+    except Exception:
+        pass
+    return "UTC"
+
+
+def _run_onboarding() -> dict:
+    """Interactive first-launch setup. Returns the saved profile dict."""
+    repl = PromptSession(history=InMemoryHistory())
+    teal = _rgb(0, 210, 210)
+    dim  = C.DIM + _rgb(150, 150, 150)
+    num  = _rgb(0, 180, 180)
+    ok   = _rgb(0, 210, 80)
+
+    print()
+    print(f"  {C.BOLD}{teal}✦ 你好，我是 Wisp{C.RESET}")
+    print(f"  {dim}在开始之前，让我先了解一下你。{C.RESET}")
+    print()
+
+    # 1/3 — name
+    print(f"  {num}1/3{C.RESET}  我该怎么称呼你？")
+    name = repl.prompt("  ▶ ", in_thread=True).strip() or "朋友"
+    print()
+
+    # 2/3 — verbosity
+    print(f"  {num}2/3{C.RESET}  你希望我回复时的风格是？")
+    print(f"  {dim}[1] 简洁直接（默认）  [2] 详细解释{C.RESET}")
+    v = repl.prompt("  ▶ ", in_thread=True).strip()
+    verbosity = "detailed" if v == "2" else "concise"
+    print()
+
+    # 3/3 — language
+    print(f"  {num}3/3{C.RESET}  你主要使用什么语言？")
+    print(f"  {dim}[1] 中文（默认）  [2] English  [3] 中英混合{C.RESET}")
+    lang = repl.prompt("  ▶ ", in_thread=True).strip()
+    language = {"2": "en", "3": "zh-en"}.get(lang, "zh-CN")
+    print()
+
+    profile = {
+        "user": {
+            "name":     name,
+            "language": language,
+            "location": "",
+            "timezone": _detect_timezone(),
+            "bio":      "",
+        },
+        "agent": {
+            "name": "Wisp",
+            "persona": (
+                "简洁直接，不说废话，不重复用户已知的信息。\n"
+                "除非用户用英文提问，否则一律用中文回答。\n"
+                "遇到不确定的事情，先说不确定，再给建议。"
+            ),
+            "style": {"verbosity": verbosity},
+        },
+        "behaviors": [
+            "交互式网页任务（查票、填表、登录）用 browser 工具，不用 http_get",
+            "多文件操作用 bash glob，不要多次调 read_file",
+            "生成的文件/报告保存后用 open 工具打开",
+            "bash 输出过长时先用 head/grep 过滤再返回",
+        ],
+    }
+
+    with open(_PROFILE_PATH, "w") as f:
+        yaml.dump(profile, f, allow_unicode=True, default_flow_style=False,
+                  sort_keys=False)
+
+    print(f"  {ok}✓{C.RESET}  {C.BOLD}{name}{C.RESET}，配置已保存。"
+          f"  {dim}之后可以编辑 profile.yaml 修改。{C.RESET}")
+    print()
+    return profile
 
 # ── Welcome banner ────────────────────────────────────────────────────────────
 
@@ -545,12 +666,20 @@ def _print_tasks() -> None:
 # ── Interactive REPL ──────────────────────────────────────────────────────────
 
 def interactive() -> None:
+    # Onboarding: first launch if no profile exists
+    if not _PROFILE_PATH.exists():
+        print_banner()
+        _profile = _run_onboarding()
+    else:
+        _profile = _load_profile()
+        print_banner()
+
+    _sys_prompt = _build_system_prompt(_profile)
+
     # Start a new session
     sid = _session.new_id()
     _task.set_session_id(sid)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    print_banner()
+    messages = [{"role": "system", "content": _sys_prompt}]
 
     # Hint if there are saved sessions
     n_sessions = _session.count()
@@ -603,13 +732,13 @@ def interactive() -> None:
             elif cmd == "new":
                 _session.save(sid, messages)
                 sid      = _session.new_id()
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                messages = [{"role": "system", "content": _sys_prompt}]
                 _task.set_session_id(sid)
                 _task.set_current_id(None)
                 print(c(C.GRAY, "  new session started"))
 
             elif cmd == "reset":
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                messages = [{"role": "system", "content": _sys_prompt}]
                 _task.set_current_id(None)
                 print(c(C.GRAY, "  history cleared"))
 
@@ -669,7 +798,8 @@ def interactive() -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         oneshot_task = " ".join(sys.argv[1:]).strip()
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        _profile  = _load_profile()
+        messages  = [{"role": "system", "content": _build_system_prompt(_profile)}]
         run_agent(oneshot_task, messages)
     else:
         interactive()

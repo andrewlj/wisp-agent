@@ -382,7 +382,7 @@ def _llm_post(payload: dict, stream: bool = False) -> requests.Response:
       stream=True  → read_timeout=30s per chunk  (catches stalled streams)
       stream=False → read_timeout=120s            (non-streaming calls can be slow)
     """
-    timeout   = (10, 30) if stream else (10, 120)
+    timeout   = (10, 120)
     last_err: Exception = RuntimeError("LLM request failed")
 
     for attempt in range(_MAX_RETRIES + 1):

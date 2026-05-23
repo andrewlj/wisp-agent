@@ -175,7 +175,11 @@ _ICT_B_STRONG = {
     "earnings", "funding", "acquisition", "merger", "ipo", "layoff",
     "lawsuit", "antitrust", "revenue", "profit", "investment",
 }
-_ICT_B_EXCL = {"promo code", "coupon", "gift guide", "shopping", "deal alert"}
+_ICT_B_EXCL = {
+    "promo code", "coupon", "gift guide", "shopping", "deal alert",
+    "memorial day", "prime day", "black friday", "cyber monday",
+    "best deals", "tech deals", "our picks", "hands-on review",
+}
 
 _IRE_KW = {
     "ireland", "irish", "dublin", "cork", "galway", "limerick", "waterford",
@@ -186,11 +190,21 @@ _IRE_SIG = {
     "garda", "gardaí", "court", "crime", "police", "housing", "rent",
     "hospital", "health", "hse", "school", "minister", "government",
     "dail", "taoiseach", "transport", "consumer",
+    # election / political
+    "election", "vote", "voting", "tally", "count", "constituency",
+    "referendum", "budget", "tax", "party", "fine gael", "fianna fáil",
+    "sinn féin", "labour", "green party", "social democrats",
+    # public safety / justice
+    "drugs", "cocaine", "murder", "assault", "arrested", "trial", "sentence",
+    "flood", "fire", "emergency", "inquiry", "investigation",
+    # economy / social
+    "cost of living", "inflation", "wages", "workers", "strike", "protest",
 }
 _IRE_EXCL = {
-    "ukraine", "russia", "gaza", "israel", "iran", "germany", "france",
-    "spain", "italy", "china", "nato", "middle east",
     "westlife", "property", "motoring", "car review",
+    # Removed global political terms (ukraine/russia/nato etc.) — they appear in
+    # legitimate Irish domestic news (e.g. Irish government statements on EU/NATO).
+    # URL-path filtering (_IRE_URL_INC / _IRE_URL_EXCL) already handles world news.
 }
 _IRE_URL_INC  = ("/news/ireland/", "/ireland/", "/irish-news/", "/news/dublin/",
                  "/news/cork/", "/crime-law/courts/", "/housing/", "/health/")
@@ -336,12 +350,18 @@ def _keep_ict_research(item: dict) -> bool:
     return _has_any(title, _ICT_R_TITLE_REQUIRED) and _count(text, _ICT_R_KW) >= 1
 
 
+_ICT_B_TECH_SOURCES = {"The Verge", "Wired", "Ars Technica", "MIT Technology Review"}
+
 def _keep_ict_business(item: dict) -> bool:
-    text  = _item_text(item)
-    title = item.get("title", "").lower()
+    text   = _item_text(item)
+    title  = item.get("title", "").lower()
+    source = item.get("source", "")
     if _has_any(text, _ICT_B_EXCL):
         return False
     if _count(text, _ICT_B_STRONG) >= 1:
+        return True
+    # Known tech media: lower bar — 1 keyword hit in title is enough
+    if source in _ICT_B_TECH_SOURCES and _has_any(title, _ICT_B_KW):
         return True
     return _count(text, _ICT_B_KW) >= 2 and _has_any(title, _ICT_B_KW)
 
@@ -366,6 +386,10 @@ def _keep_china(item: dict) -> bool:
     title_hits = _count(title, _CHINA_KW)
     text_hits  = _count(text,  _CHINA_KW)
     sig_hits   = _count(text,  _CHINA_SIG)
+    # Strong title signal (2+ China keywords) → bypass sig requirement
+    # (BBC RSS descriptions can be too short to accumulate sig_hits)
+    if title_hits >= 2:
+        return True
     return (title_hits >= 1 or text_hits >= 2) and sig_hits >= 1
 
 
@@ -870,9 +894,13 @@ def generate_report(
     _per_source_cap = {
         "political":    2,
         "ict_research": 2,
-        "ict_business": 2,
+        # ict_business: cap raised so content filter sees enough candidates
+        # (The Verge/Wired/Ars mix useful articles in with lifestyle/deals)
+        "ict_business": 5,
         "ireland":      3,
-        "china":        2,
+        # China sources (BBC World, BBC Asia) are mixed feeds — need a higher raw
+        # candidate pool so the _keep_china filter has enough to work with.
+        "china":        8,
     }
 
     # ── 2. fetch all sections (isolated per-section) ──────────────────────────

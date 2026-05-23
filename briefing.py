@@ -555,11 +555,108 @@ def _call_llm(prompt: str, max_tokens: int = 2048) -> str:
     return resp.json()["choices"][0]["message"]["content"]
 
 
+def _clean_llm_output(raw: str) -> str:
+    """Strip thinking tags and markdown fences from LLM output."""
+    text = _strip_thinking(raw)
+    # Remove ```json ... ``` or ``` ... ``` fences
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = text.replace("```", "").strip()
+    return text
+
+
+def _fix_json(s: str) -> str:
+    """Fix the most common LLM JSON mistakes."""
+    # Trailing commas before ] or }
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+    # Python-style None/True/False
+    s = re.sub(r"\bNone\b",  "null",  s)
+    s = re.sub(r"\bTrue\b",  "true",  s)
+    s = re.sub(r"\bFalse\b", "false", s)
+    return s
+
+
+def _try_json_loads(s: str):
+    """Try json.loads; on failure try after _fix_json. Returns parsed object or raises."""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        return json.loads(_fix_json(s))
+
+
+def _parse_llm_json(raw: str) -> list[dict] | None:
+    """Multi-strategy extraction of a JSON array from LLM output.
+
+    Strategies (in order):
+    1. Parse the whole cleaned text directly.
+    2. Extract the first [...] block via regex, parse that.
+    3. Same block after _fix_json.
+    4. Extract individual {...} objects and reassemble.
+    Returns None if all strategies fail.
+    """
+    text = _clean_llm_output(raw)
+
+    # Strategy 1: direct parse
+    try:
+        data = _try_json_loads(text)
+        if isinstance(data, list):
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strategy 2 & 3: extract first [...] block
+    m = re.search(r"\[.*\]", text, re.DOTALL)
+    if m:
+        block = m.group(0)
+        try:
+            data = _try_json_loads(block)
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 4: extract individual {...} objects
+    objects = re.findall(r'\{[^{}]+\}', text, re.DOTALL)
+    if objects:
+        result = []
+        for obj in objects:
+            try:
+                result.append(_try_json_loads(obj))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        if result:
+            return result
+
+    return None
+
+
+def _translate_titles_simple(items: list[dict]) -> list[str]:
+    """Fallback: numbered-list translation (simpler format, more reliable)."""
+    numbered = "\n".join(f"{i+1}. {item['title']}" for i, item in enumerate(items))
+    prompt = (
+        "Translate each English headline to Simplified Chinese. "
+        "Output ONLY numbered lines in the same order, nothing else.\n\n"
+        + numbered
+    )
+    try:
+        raw   = _call_llm(prompt, max_tokens=512)
+        text  = _clean_llm_output(raw)
+        lines = [re.sub(r"^\d+[.)、]\s*", "", ln).strip()
+                 for ln in text.splitlines() if ln.strip()]
+        lines = [ln for ln in lines if ln]
+        # Pad or truncate to match item count
+        while len(lines) < len(items):
+            lines.append(items[len(lines)]["title"])
+        return lines[:len(items)]
+    except Exception:
+        return [item["title"] for item in items]
+
+
 def _translate_and_summarize(items: list[dict]) -> list[dict]:
     """One LLM call: translate titles + write Chinese summaries.
 
     Returns list of {"title_cn": str, "summary_cn": str}.
-    Falls back to English on any LLM failure.
+    On JSON parse failure, retries with a simpler numbered-list format.
+    Falls back to English titles as last resort.
     """
     if not items:
         return []
@@ -575,32 +672,36 @@ def _translate_and_summarize(items: list[dict]) -> list[dict]:
         parts.append(f'{i}. Title: {item["title"]}\n   Abstract: {desc or "(none)"}')
 
     prompt = (
-        "You are a professional news editor. For each numbered news item, do TWO things:\n"
-        "1. Translate the English title into Simplified Chinese.\n"
-        "2. Write a 2–3 sentence Chinese summary (80–150 characters) based on the title and abstract.\n\n"
-        "Return ONLY a valid JSON array — no markdown, no explanation:\n"
-        '[{"title_cn":"...","summary_cn":"..."},...]\n\n'
+        "You are a professional news editor. For each numbered news item below, "
+        "translate the title to Simplified Chinese and write a 2–3 sentence Chinese "
+        "summary (80–150 characters) based on the title and abstract.\n\n"
+        "Output ONLY a raw JSON array, no markdown fences, no explanation:\n"
+        '[{"title_cn":"<Chinese title>","summary_cn":"<Chinese summary>"},...]\n\n'
         + "\n\n".join(parts)
     )
 
     try:
         raw  = _call_llm(prompt, max_tokens=2048)
-        raw  = _strip_thinking(raw)
-        # Tolerate leading/trailing whitespace, markdown fences, or extra text
-        m = re.search(r"\[.*\]", raw, re.DOTALL)
-        if not m:
-            return fallback
-        data = json.loads(m.group(0))
-        if not isinstance(data, list):
-            return fallback
-        result = []
-        for i, item in enumerate(items):
-            entry = data[i] if i < len(data) and isinstance(data[i], dict) else {}
-            result.append({
-                "title_cn":   (entry.get("title_cn") or "").strip() or item["title"],
-                "summary_cn": (entry.get("summary_cn") or "").strip() or item.get("description", ""),
-            })
-        return result
+        data = _parse_llm_json(raw)
+
+        if data is not None:
+            result = []
+            for i, item in enumerate(items):
+                entry = data[i] if i < len(data) and isinstance(data[i], dict) else {}
+                result.append({
+                    "title_cn":   (entry.get("title_cn") or "").strip() or item["title"],
+                    "summary_cn": (entry.get("summary_cn") or "").strip() or item.get("description", ""),
+                })
+            return result
+
+        # JSON completely unparseable — fall back to simple title-only translation
+        print(f"      ✗ JSON parse failed, retrying with simpler prompt...")
+        titles_cn = _translate_titles_simple(items)
+        return [
+            {"title_cn": titles_cn[i], "summary_cn": item.get("description", "")}
+            for i, item in enumerate(items)
+        ]
+
     except Exception as e:
         print(f"      ✗ LLM error: {e}")
         return fallback

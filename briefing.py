@@ -53,24 +53,22 @@ def init_briefing(base_url: str, api_key: str, model: str, workspace: str) -> No
 # ── Section metadata ──────────────────────────────────────────────────────────
 
 SECTION_LABELS = {
-    "political":     "🌍 政治国际",
-    "ict_research":  "💡 ICT 前沿研究",
-    "ict_business":  "🏢 高科技企业",
-    "ireland":       "🇮🇪 爱尔兰新闻",
-    "entertainment": "🎬 娱乐",
-    "china":         "🇨🇳 中国要闻",
+    "political":    "🌍 政治国际",
+    "ict_research": "💡 ICT 前沿研究",
+    "ict_business": "🏢 高科技企业",
+    "ireland":      "🇮🇪 爱尔兰新闻",
+    "china":        "🇨🇳 中国要闻",
 }
 
 SECTION_DIV_IDS = {
-    "political":     "political-international",
-    "ict_research":  "ict-research-breakthroughs",
-    "ict_business":  "ict-business-news",
-    "ireland":       "ireland-news",
-    "entertainment": "entertainment",
-    "china":         "china-news",
+    "political":    "political-international",
+    "ict_research": "ict-research-breakthroughs",
+    "ict_business": "ict-business-news",
+    "ireland":      "ireland-news",
+    "china":        "china-news",
 }
 
-ALL_SECTIONS = ["political", "ict_research", "ict_business", "ireland", "entertainment", "china"]
+ALL_SECTIONS = ["political", "ict_research", "ict_business", "ireland", "china"]
 
 # ── Domain whitelists ─────────────────────────────────────────────────────────
 
@@ -115,12 +113,11 @@ _ENT_DOMAINS = {
 }
 
 _SECTION_DOMAINS = {
-    "political":     _POL_DOMAINS,
-    "ict_research":  _ICT_DOMAINS,
-    "ict_business":  _ICT_DOMAINS,
-    "ireland":       _IRE_DOMAINS,
-    "entertainment": _ENT_DOMAINS,
-    "china":         _POL_DOMAINS,
+    "political":    _POL_DOMAINS,
+    "ict_research": _ICT_DOMAINS,
+    "ict_business": _ICT_DOMAINS,
+    "ireland":      _IRE_DOMAINS,
+    "china":        _POL_DOMAINS,
 }
 
 # ── Keyword filters ───────────────────────────────────────────────────────────
@@ -230,12 +227,6 @@ _SOURCES: dict[str, list[dict]] = {
         {"type": "rss",  "url": "https://www.independent.ie/rss/",                   "hostname": "independent.ie"},
         {"type": "rss",  "url": "https://www.irishtimes.com/arc/outboundfeeds/rss/", "hostname": "irishtimes.com"},
         {"type": "page", "url": "https://www.rte.ie/news/ireland/",                  "hostname": "rte.ie", "url_pattern": "/news/ireland/"},
-    ],
-    "entertainment": [
-        {"type": "rss", "url": "https://variety.com/feed/",                          "hostname": "variety.com"},
-        {"type": "rss", "url": "https://deadline.com/feed/",                         "hostname": "deadline.com"},
-        {"type": "rss", "url": "https://www.hollywoodreporter.com/feed/",            "hostname": "hollywoodreporter.com"},
-        {"type": "rss", "url": "https://www.billboard.com/feed/",                    "hostname": "billboard.com"},
     ],
     "china": [
         {"type": "page", "url": "https://www.bbc.com/news/world/asia/china",         "hostname": "bbc.com", "url_pattern": "/news/articles/"},
@@ -693,19 +684,24 @@ def _translate_titles_simple(items: list[dict]) -> list[str]:
         return [item["title"] for item in items]
 
 
-def _translate_and_summarize(items: list[dict]) -> list[dict]:
-    """One LLM call with JSON mode: translate titles + write Chinese summaries.
+_TRANSLATE_BATCH = 3   # items per LLM call — keeps token count low and count reliable
 
-    Uses response_format=json_object so the server guarantees valid JSON output.
-    Falls back to _translate_titles_simple() on any error.
-    """
-    if not items:
+
+def _is_english(text: str) -> bool:
+    """Return True if the text looks like untranslated English (>65% ASCII alpha chars)."""
+    alpha = [c for c in text if c.isalpha()]
+    if not alpha:
+        return False
+    return sum(1 for c in alpha if c.isascii()) / len(alpha) > 0.65
+
+
+def _translate_batch(items: list[dict]) -> list[dict]:
+    """Translate + summarise one small batch. Returns list of {title_cn, summary_cn}."""
+    n        = len(items)
+    fallback = [{"title_cn": item["title"], "summary_cn": item.get("description", "")}
+                for item in items]
+    if n == 0:
         return []
-
-    fallback = [
-        {"title_cn": item["title"], "summary_cn": item.get("description", "")}
-        for item in items
-    ]
 
     parts = []
     for i, item in enumerate(items, 1):
@@ -713,42 +709,57 @@ def _translate_and_summarize(items: list[dict]) -> list[dict]:
         parts.append(f'{i}. Title: {item["title"]}\n   Abstract: {desc or "(none)"}')
 
     prompt = (
-        "You are a professional news editor. For each numbered news item below, "
-        "translate the title to Simplified Chinese and write a 2–3 sentence Chinese "
-        "summary (80–150 characters) based on the title and abstract.\n\n"
-        "Return a JSON object with key \"items\" containing an array:\n"
-        '{"items":[{"title_cn":"...","summary_cn":"..."}]}\n\n'
+        "You are a professional news editor. For each numbered item, translate the "
+        "title to Simplified Chinese and write a 2–3 sentence Chinese summary "
+        f"(80–150 characters).\n\n"
+        f"IMPORTANT: return EXACTLY {n} objects in the array — one per input, in order.\n"
+        'JSON format: {"items":[{"title_cn":"...","summary_cn":"..."}]}\n\n'
         + "\n\n".join(parts)
     )
 
     try:
-        raw  = _call_llm(prompt, max_tokens=2048, json_mode=True)
-        # Server guarantees valid JSON; just parse and extract
+        raw  = _call_llm(prompt, max_tokens=600, json_mode=True)
         data = json.loads(raw)
-        # Accept {"items":[...]} or a bare [...]
         if isinstance(data, dict):
             data = data.get("items") or data.get("results") or list(data.values())[0]
         if not isinstance(data, list):
-            raise ValueError(f"unexpected JSON shape: {type(data)}")
+            raise ValueError(f"unexpected shape: {type(data)}")
 
         result = []
         for i, item in enumerate(items):
-            entry = data[i] if i < len(data) and isinstance(data[i], dict) else {}
-            title_cn   = str(entry.get("title_cn")   or "").strip() or item["title"]
+            entry      = data[i] if i < len(data) and isinstance(data[i], dict) else {}
+            title_cn   = str(entry.get("title_cn")   or "").strip()
             summary_cn = str(entry.get("summary_cn") or "").strip()
-            # Reject degenerate summaries: pure numbers or too short
+
+            # Translation failed → keep original title
+            if not title_cn or _is_english(title_cn):
+                title_cn = item["title"]
+
+            # Degenerate summary → fall back to RSS description
             if not summary_cn or re.match(r"^[\d\s.,/%-]+$", summary_cn) or len(summary_cn) < 15:
                 summary_cn = item.get("description", "")
+
             result.append({"title_cn": title_cn, "summary_cn": summary_cn})
+
+        # Pad if LLM returned fewer items than requested
+        while len(result) < n:
+            result.append(fallback[len(result)])
+
         return result
 
     except Exception as e:
-        print(f"      ✗ JSON mode error: {e}, retrying with simple prompt...")
-        titles_cn = _translate_titles_simple(items)
-        return [
-            {"title_cn": titles_cn[i], "summary_cn": item.get("description", "")}
-            for i, item in enumerate(items)
-        ]
+        print(f"      ✗ batch translate error: {e}")
+        return fallback
+
+
+def _translate_and_summarize(items: list[dict]) -> list[dict]:
+    """Translate + summarise all items in batches of _TRANSLATE_BATCH."""
+    if not items:
+        return []
+    result = []
+    for i in range(0, len(items), _TRANSLATE_BATCH):
+        result.extend(_translate_batch(items[i: i + _TRANSLATE_BATCH]))
+    return result
 
 
 # ── HTML rendering ────────────────────────────────────────────────────────────
@@ -822,13 +833,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
   <div class="section"><h2>💡 ICT 前沿研究与技术突破</h2><div id="ict-research-breakthroughs"></div></div>
   <div class="section"><h2>🏢 高科技企业重大新闻</h2><div id="ict-business-news"></div></div>
   <div class="section"><h2>🇮🇪 爱尔兰新闻</h2><div id="ireland-news"></div></div>
-  <div class="section"><h2>🎬 娱乐</h2><div id="entertainment"></div></div>
   <div class="section"><h2>🇨🇳 中国要闻</h2><div id="china-news"></div></div>
   <div class="footer">
     wisp-agent · 自动生成 ·
     数据来源：Reuters · AP · BBC · FT · WSJ · Nature · IEEE · MIT TR ·
-    The Verge · Ars Technica · Wired · Variety · Deadline · Billboard ·
-    RTÉ · Irish Times · Irish Independent · The Journal
+    The Verge · Ars Technica · Wired · RTÉ · Irish Times · Irish Independent · The Journal
   </div>
 </div>
 </body>
@@ -855,10 +864,15 @@ def generate_report(
     # ── 1. history dedup ──────────────────────────────────────────────────────
     history_keys = _load_history_keys()
 
-    # Per-source cap per section: prevents one prolific feed from dominating.
-    # ict_research has 6 sources → cap 2 each so all sources get represented.
+    # Per-source cap: each source outlet contributes at most N candidates,
+    # ensuring all feed sources get representation before filtering.
+    # ireland=3 because its keyword filter is strict and needs more raw candidates.
     _per_source_cap = {
+        "political":    2,
         "ict_research": 2,
+        "ict_business": 2,
+        "ireland":      3,
+        "china":        2,
     }
 
     # ── 2. fetch all sections (isolated per-section) ──────────────────────────

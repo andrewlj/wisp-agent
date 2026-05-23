@@ -282,40 +282,60 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
 # ── Output helpers ────────────────────────────────────────────────────────────
 
 _TURN_WIDTH = _LOGO_LINE_W  # align turn separators with the banner
+_DEBUG      = False          # toggled by /debug command
 
-def _print_turn_header(turn: int, max_turns: int) -> None:
+
+def _print_turn_header(turn: int, max_turns: int, messages: list | None = None) -> None:
+    token_hint = ""
+    if _DEBUG and messages is not None:
+        est = _estimate_tokens(messages)
+        token_hint = f"  {C.DIM}{_rgb(120,90,200)}~{est} tok{C.RESET}"
     label     = f" turn {turn}/{max_turns} "
-    bar_total = _TURN_WIDTH - len(label) - 2   # 2 for leading "  "
+    # account for token_hint's visible length (no ANSI) when computing bars
+    hint_vis  = f"  ~{_estimate_tokens(messages or [])} tok" if (_DEBUG and messages) else ""
+    bar_total = _TURN_WIDTH - len(label) - len(hint_vis) - 2
     left_bar  = 4
-    right_bar = bar_total - left_bar
+    right_bar = max(0, bar_total - left_bar)
     line = (f"{_rgb(0,80,95)}{'─'*left_bar}{C.RESET}"
             f"{C.DIM}{_rgb(120,120,120)}{label}{C.RESET}"
-            f"{_rgb(0,80,95)}{'─'*right_bar}{C.RESET}")
+            f"{_rgb(0,80,95)}{'─'*right_bar}{C.RESET}"
+            + token_hint)
     print(f"\n  {line}")
 
+
 def _print_tool_call(name: str, args: dict) -> None:
-    name_col  = f"{C.BOLD}{_rgb(0,210,210)}{name}{C.RESET}"
-    args_str  = json.dumps(args, ensure_ascii=False)
-    max_args  = _TURN_WIDTH - len(name) - 10
-    if len(args_str) > max_args:
-        args_str = args_str[:max_args - 3] + "..."
-    print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}  {C.DIM}{_rgb(140,140,140)}{args_str}{C.RESET}")
+    name_col = f"{C.BOLD}{_rgb(0,210,210)}{name}{C.RESET}"
+    if _DEBUG:
+        pretty = json.dumps(args, ensure_ascii=False, indent=2)
+        print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}")
+        for ln in pretty.splitlines():
+            print(f"    {C.DIM}{_rgb(140,140,140)}{ln}{C.RESET}")
+    else:
+        args_str = json.dumps(args, ensure_ascii=False)
+        max_args = _TURN_WIDTH - len(name) - 10
+        if len(args_str) > max_args:
+            args_str = args_str[:max_args - 3] + "..."
+        print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}  {C.DIM}{_rgb(140,140,140)}{args_str}{C.RESET}")
+
 
 def _print_tool_result(result: str) -> None:
     r = result.strip()
-    preview = r[:300] + ("..." if len(r) > 300 else "")
     # Color by result type
     if r.startswith("security:") or r.startswith("error:"):
-        color = _rgb(220, 80, 80)     # red — error
+        color = _rgb(220, 80, 80)
     elif "[exit 0]" in r:
-        color = _rgb(80, 185, 120)    # green — success
+        color = _rgb(80, 185, 120)
     elif r.startswith("ok:"):
-        color = _rgb(80, 185, 120)    # green — ok
+        color = _rgb(80, 185, 120)
     elif any(f"[exit {i}]" in r for i in range(1, 256)):
-        color = _rgb(210, 170, 50)    # yellow — non-zero exit
+        color = _rgb(210, 170, 50)
     else:
-        color = _rgb(130, 130, 130)   # gray — neutral
-    print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{preview}{C.RESET}")
+        color = _rgb(130, 130, 130)
+    if _DEBUG:
+        print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{r}{C.RESET}")
+    else:
+        preview = r[:300] + ("..." if len(r) > 300 else "")
+        print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{preview}{C.RESET}")
 
 def _print_done(result_text: str) -> None:
     bar   = f"{_rgb(0,170,100)}{'─' * _TURN_WIDTH}{C.RESET}"
@@ -486,7 +506,7 @@ def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
     messages.append({"role": "user", "content": user_input})
     _maybe_compress(messages)
     for turn in range(1, MAX_TURNS + 1):
-        _print_turn_header(turn, MAX_TURNS)
+        _print_turn_header(turn, MAX_TURNS, messages)
         if run_turn(messages, turn, MAX_TURNS):
             break
     else:
@@ -613,6 +633,14 @@ def interactive() -> None:
                         _task.set_current_id(arg)
                         print(c(C.CYAN, context))
 
+            elif cmd == "debug":
+                global _DEBUG
+                _DEBUG = not _DEBUG
+                state = f"{_rgb(0,210,210)}on{C.RESET}" if _DEBUG else f"{_rgb(130,130,130)}off{C.RESET}"
+                print(f"  debug mode {state}"
+                      + (f"  {C.DIM}{_rgb(120,90,200)}(full args · full results · token count per turn){C.RESET}"
+                         if _DEBUG else ""))
+
             elif cmd == "help":
                 print(c(C.GRAY,
                     "  /sessions          list saved sessions\n"
@@ -622,6 +650,7 @@ def interactive() -> None:
                     "  /reset             clear current history\n"
                     "  /tasks             list saved tasks\n"
                     "  /resume <task-id>  resume an interrupted task\n"
+                    "  /debug             toggle verbose debug output\n"
                     "  /exit              quit wisp"
                 ))
 

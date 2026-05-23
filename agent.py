@@ -45,10 +45,12 @@ CTX_LIMIT       = _cfg["agent"].get("context_limit", 6000)
 CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
 BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
 
-# Initialise workspace sandbox and browser timeout
+# Initialise workspace sandbox, browser timeout, and briefing LLM config
 from tools import init_workspace, init_browser_timeout
+from briefing import init_briefing
 init_workspace(WORKSPACE, STRICT)
 init_browser_timeout(BROWSER_TO)
+init_briefing(BASE_URL, API_KEY, MODEL, WORKSPACE)
 
 _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
 SYSTEM_PROMPT = f"""You are a helpful assistant running on macOS (Apple Silicon). \
@@ -148,6 +150,7 @@ _TOOLS_MAP = [
     ("browser", ["browser_open", "browser_click", "browser_type",
                  "browser_get_text", "browser_screenshot", "browser_close"]),
     ("task",    ["task_init", "task_step_done", "task_step_fail"]),
+    ("news",    ["daily_briefing"]),
 ]
 
 def _rpad(s: str, width: int) -> str:

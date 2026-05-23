@@ -285,6 +285,26 @@ SCHEMAS: list[dict] = [
     _fn("browser_close", "Close the Playwright browser.",
         {}, []),
 
+    # ── Daily briefing ────────────────────────────────────────────────────────
+    _fn("daily_briefing",
+        "Generate today's global news briefing as an HTML report. "
+        "Fetches from RSS/sitemap sources, translates to Chinese, saves HTML. "
+        "Sections: political/international, ICT research, ICT business, "
+        "Irish news, entertainment, China news. Takes ~60–90 s.",
+        {
+            "open_browser": {
+                "type":        "boolean",
+                "description": "Open the report in the default browser when done. Default true.",
+            },
+            "sections": {
+                "type":        "array",
+                "items":       {"type": "string",
+                                "enum": ["political", "ict_research", "ict_business",
+                                         "ireland", "entertainment", "china"]},
+                "description": "Sections to include. Omit to generate all six.",
+            },
+        }, []),
+
     # ── Task checkpoint ───────────────────────────────────────────────────────
     _fn("task_init",
         "Create a task plan with numbered steps. Call this at the start of any multi-step task "
@@ -593,6 +613,20 @@ def tool_browser_close() -> str:
         return f"error: {e}"
 
 
+# ── Daily briefing ───────────────────────────────────────────────────────────
+
+def tool_daily_briefing(open_browser: bool = True,
+                        sections: list | None = None) -> str:
+    try:
+        import briefing as _briefing
+        return _briefing.generate_report(
+            sections=sections or None,
+            open_browser=open_browser,
+        )
+    except Exception as e:
+        return f"error: {e}"
+
+
 # ── Task checkpoint ───────────────────────────────────────────────────────────
 
 def tool_task_init(title: str, steps: list[str]) -> str:
@@ -639,6 +673,10 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         # Network
         case "http_get":         return tool_http_get(args["url"], args.get("headers"))
         case "http_post":        return tool_http_post(args["url"], args["body"], args.get("headers"))
+        # Daily briefing
+        case "daily_briefing":     return tool_daily_briefing(
+                                       args.get("open_browser", True),
+                                       args.get("sections"))
         # Browser
         case "browser_open":       return tool_browser_open(args["url"])
         case "browser_click":      return tool_browser_click(args["selector"])

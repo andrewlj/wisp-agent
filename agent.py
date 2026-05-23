@@ -366,6 +366,55 @@ def print_banner() -> None:
     print(f"  {bc}└{'─'*(W+2)}┘{C.RESET}")
     print()
 
+# ── LLM HTTP layer (retry + timeout) ─────────────────────────────────────────
+
+_MAX_RETRIES  = 3
+_RETRY_DELAYS = (1, 2, 4)   # seconds between attempts
+
+
+def _llm_post(payload: dict, stream: bool = False) -> requests.Response:
+    """POST to the LLM endpoint with exponential-backoff retry on transient errors.
+
+    Retries on:  connection error, read timeout, HTTP 5xx
+    No retry on: HTTP 4xx (bad request / auth failure — retrying won't help)
+
+    Timeout tuple: (connect_timeout=10s, read_timeout)
+      stream=True  → read_timeout=30s per chunk  (catches stalled streams)
+      stream=False → read_timeout=120s            (non-streaming calls can be slow)
+    """
+    timeout   = (10, 30) if stream else (10, 120)
+    last_err: Exception = RuntimeError("LLM request failed")
+
+    for attempt in range(_MAX_RETRIES + 1):
+        if attempt > 0:
+            delay = _RETRY_DELAYS[attempt - 1]
+            print(f"\n  {_rgb(210,170,50)}⟳  LLM unreachable — retry {attempt}/{_MAX_RETRIES}"
+                  f" in {delay}s…{C.RESET}", flush=True)
+            time.sleep(delay)
+        try:
+            resp = requests.post(
+                BASE_URL,
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json=payload,
+                stream=stream,
+                timeout=timeout,
+            )
+            if resp.status_code >= 500:
+                last_err = requests.exceptions.HTTPError(
+                    f"server error {resp.status_code}", response=resp)
+                continue          # retry on 5xx
+            resp.raise_for_status()   # raises immediately on 4xx
+            return resp
+        except requests.exceptions.HTTPError:
+            raise                     # 4xx → propagate, no retry
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            last_err = e
+            continue
+
+    raise last_err   # exhausted all retries
+
+
 # ── Streaming API ─────────────────────────────────────────────────────────────
 
 def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
@@ -374,21 +423,14 @@ def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
     usage = {"prompt_tokens": N, "completion_tokens": M} when the server
     reports it; empty dict when not available.
     """
-    resp = requests.post(
-        BASE_URL,
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        json={
-            "model":       MODEL,
-            "messages":    messages,
-            "tools":       SCHEMAS,
-            "tool_choice": "auto",
-            "max_tokens":  MAX_TOKENS,
-            "stream":      True,
-        },
-        stream=True,
-        timeout=120,
-    )
-    resp.raise_for_status()
+    resp = _llm_post({
+        "model":       MODEL,
+        "messages":    messages,
+        "tools":       SCHEMAS,
+        "tool_choice": "auto",
+        "max_tokens":  MAX_TOKENS,
+        "stream":      True,
+    }, stream=True)
 
     full_content = ""
     acc: dict[int, dict] = {}
@@ -591,21 +633,60 @@ def _estimate_tokens(messages: list) -> int:
     return total // 4
 
 
-def _call_api_simple(messages: list) -> str:
+def _call_api_simple(messages: list, max_tokens: int = 1024) -> str:
     """Single non-streaming LLM call; returns content string."""
-    resp = requests.post(
-        BASE_URL,
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        json={
-            "model":      MODEL,
-            "messages":   messages,
-            "max_tokens": 1024,
-            "stream":     False,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
+    resp = _llm_post({
+        "model":      MODEL,
+        "messages":   messages,
+        "max_tokens": max_tokens,
+        "stream":     False,
+    })
     return resp.json()["choices"][0]["message"]["content"]
+
+
+def _build_compress_transcript(middle: list[dict]) -> str:
+    """Build a structured transcript of the middle messages for compression.
+
+    Strategy:
+    - user / assistant text  → kept, truncated at 300 chars
+    - tool call              → kept as  [call] name(args)
+    - tool result ok / exit0 → short preview (first 120 chars)
+    - tool result error/security/non-zero exit → kept verbatim up to 400 chars
+      (errors are critical for understanding what went wrong)
+    """
+    lines: list[str] = []
+    for m in middle:
+        role    = m.get("role", "")
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        content = str(content).strip()
+
+        if role == "assistant":
+            if m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    fn   = tc.get("function", {})
+                    name = fn.get("name", "")
+                    args = fn.get("arguments", "")
+                    if len(args) > 160:
+                        args = args[:160] + "…"
+                    lines.append(f"[call] {name}({args})")
+            if content:
+                lines.append(f"[assistant] {content[:300]}")
+
+        elif role == "tool":
+            is_error = (content.startswith(("error:", "security:"))
+                        or any(f"[exit {i}]" in content for i in range(1, 256)))
+            if is_error:
+                lines.append(f"[tool:FAIL] {content[:400]}")
+            else:
+                preview = content[:120] + ("…" if len(content) > 120 else "")
+                lines.append(f"[tool:ok] {preview}")
+
+        elif role == "user" and content:
+            lines.append(f"[user] {content[:300]}")
+
+    return "\n".join(lines)
 
 
 def _maybe_compress(messages: list) -> None:
@@ -630,27 +711,22 @@ def _maybe_compress(messages: list) -> None:
     recent   = messages[-CTX_KEEP_RECENT:]
     middle   = messages[1: len(messages) - CTX_KEEP_RECENT]
 
-    # Build a plain-text transcript of the middle section for summarisation
-    lines = []
-    for m in middle:
-        role = m.get("role", "?")
-        content = m.get("content") or ""
-        if isinstance(content, list):
-            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-        if m.get("tool_calls"):
-            for tc in m["tool_calls"]:
-                fn = tc.get("function", {})
-                lines.append(f"[tool_call] {fn.get('name','')}({fn.get('arguments','')})")
-        elif content:
-            lines.append(f"[{role}] {content}")
-
-    transcript = "\n".join(lines)
+    # Build a structured transcript — errors kept verbatim, ok results trimmed
+    transcript = _build_compress_transcript(middle)
     summary_prompt = [
-        {"role": "system", "content":
-            "You are a memory compressor. Summarise the following conversation excerpt "
-            "into a compact but complete recap. Preserve: task goals, key facts, "
-            "decisions made, commands run and their outcomes, and any open questions. "
-            "Respond with plain text only — no preamble, no commentary."},
+        {"role": "system", "content": (
+            "You are a context compressor for an AI agent session. "
+            "Summarise the following agent interaction into a compact recap.\n\n"
+            "MUST preserve:\n"
+            "- The user's original task / goal\n"
+            "- Every error, failure, or rejected tool call and its cause\n"
+            "- Key findings: file paths, data values, command outputs\n"
+            "- Decisions made and steps completed\n"
+            "- Any open / remaining steps\n\n"
+            "Drop: successful tool results whose content was already used, "
+            "verbose ok-outputs, repeated attempts with the same outcome.\n"
+            "Plain text only — no preamble, no bullet symbols unless helpful."
+        )},
         {"role": "user", "content": transcript},
     ]
 

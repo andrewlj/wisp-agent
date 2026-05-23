@@ -110,6 +110,13 @@ def _bash_risk(command: str) -> str | None:
 _pw   = None
 _browser = None
 _page    = None
+_BROWSER_TIMEOUT_MS: int = 30_000   # default 30 s; overridden by init_browser_timeout()
+
+
+def init_browser_timeout(seconds: int) -> None:
+    """Set the global browser operation timeout (in seconds)."""
+    global _BROWSER_TIMEOUT_MS
+    _BROWSER_TIMEOUT_MS = max(1, seconds) * 1000
 
 def _get_page():
     global _pw, _browser, _page
@@ -537,7 +544,7 @@ def tool_http_post(url: str, body: dict, headers: dict | None = None) -> str:
 def tool_browser_open(url: str) -> str:
     try:
         page = _get_page()
-        page.goto(url, timeout=30000)
+        page.goto(url, timeout=_BROWSER_TIMEOUT_MS)
         return f"ok: opened {url} — title: {page.title()}"
     except Exception as e:
         return f"error: {e}"
@@ -545,7 +552,7 @@ def tool_browser_open(url: str) -> str:
 
 def tool_browser_click(selector: str) -> str:
     try:
-        _get_page().click(selector, timeout=10000)
+        _get_page().click(selector, timeout=_BROWSER_TIMEOUT_MS)
         return f"ok: clicked '{selector}'"
     except Exception as e:
         return f"error: {e}"
@@ -553,7 +560,7 @@ def tool_browser_click(selector: str) -> str:
 
 def tool_browser_type(selector: str, text: str) -> str:
     try:
-        _get_page().fill(selector, text)
+        _get_page().fill(selector, text, timeout=_BROWSER_TIMEOUT_MS)
         return f"ok: typed into '{selector}'"
     except Exception as e:
         return f"error: {e}"
@@ -563,7 +570,7 @@ def tool_browser_get_text(selector: str = "") -> str:
     try:
         page = _get_page()
         el = page.locator(selector) if selector else page.locator("body")
-        text = el.inner_text(timeout=10000)
+        text = el.inner_text(timeout=_BROWSER_TIMEOUT_MS)
         return text[:4000] + ("…" if len(text) > 4000 else "")
     except Exception as e:
         return f"error: {e}"
@@ -572,7 +579,7 @@ def tool_browser_get_text(selector: str = "") -> str:
 def tool_browser_screenshot(save_path: str = "") -> str:
     path = save_path or str(workspace_path(f"screenshots/wisp-browser-{int(time.time())}.png"))
     try:
-        _get_page().screenshot(path=path)
+        _get_page().screenshot(path=path, timeout=_BROWSER_TIMEOUT_MS)
         return f"ok: browser screenshot saved to {path}"
     except Exception as e:
         return f"error: {e}"

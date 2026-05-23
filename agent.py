@@ -43,10 +43,12 @@ WORKSPACE       = _cfg["agent"].get("workspace", "~/wisp-workspace")
 STRICT          = _cfg["agent"].get("strict_workspace", True)
 CTX_LIMIT       = _cfg["agent"].get("context_limit", 6000)
 CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
+BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
 
-# Initialise workspace sandbox
-from tools import init_workspace
+# Initialise workspace sandbox and browser timeout
+from tools import init_workspace, init_browser_timeout
 init_workspace(WORKSPACE, STRICT)
+init_browser_timeout(BROWSER_TO)
 
 _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
 SYSTEM_PROMPT = f"""You are a helpful assistant running on macOS (Apple Silicon). \

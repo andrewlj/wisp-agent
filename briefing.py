@@ -538,17 +538,24 @@ def _strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def _call_llm(prompt: str, max_tokens: int = 2048) -> str:
-    """Synchronous non-streaming LLM call via wisp's configured endpoint."""
+def _call_llm(prompt: str, max_tokens: int = 2048, json_mode: bool = False) -> str:
+    """Synchronous non-streaming LLM call via wisp's configured endpoint.
+
+    json_mode=True adds response_format=json_object, forcing the server to
+    output valid JSON (supported by omlx / OpenAI-compatible servers).
+    """
+    payload: dict = {
+        "model":      _MODEL,
+        "messages":   [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "stream":     False,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
     resp = _req.post(
         _BASE_URL,
         headers={"Authorization": f"Bearer {_API_KEY}"},
-        json={
-            "model":      _MODEL,
-            "messages":   [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "stream":     False,
-        },
+        json=payload,
         timeout=120,
     )
     resp.raise_for_status()
@@ -652,11 +659,10 @@ def _translate_titles_simple(items: list[dict]) -> list[str]:
 
 
 def _translate_and_summarize(items: list[dict]) -> list[dict]:
-    """One LLM call: translate titles + write Chinese summaries.
+    """One LLM call with JSON mode: translate titles + write Chinese summaries.
 
-    Returns list of {"title_cn": str, "summary_cn": str}.
-    On JSON parse failure, retries with a simpler numbered-list format.
-    Falls back to English titles as last resort.
+    Uses response_format=json_object so the server guarantees valid JSON output.
+    Falls back to _translate_titles_simple() on any error.
     """
     if not items:
         return []
@@ -675,36 +681,37 @@ def _translate_and_summarize(items: list[dict]) -> list[dict]:
         "You are a professional news editor. For each numbered news item below, "
         "translate the title to Simplified Chinese and write a 2–3 sentence Chinese "
         "summary (80–150 characters) based on the title and abstract.\n\n"
-        "Output ONLY a raw JSON array, no markdown fences, no explanation:\n"
-        '[{"title_cn":"<Chinese title>","summary_cn":"<Chinese summary>"},...]\n\n'
+        "Return a JSON object with key \"items\" containing an array:\n"
+        '{"items":[{"title_cn":"...","summary_cn":"..."}]}\n\n'
         + "\n\n".join(parts)
     )
 
     try:
-        raw  = _call_llm(prompt, max_tokens=2048)
-        data = _parse_llm_json(raw)
+        raw  = _call_llm(prompt, max_tokens=2048, json_mode=True)
+        # Server guarantees valid JSON; just parse and extract
+        data = json.loads(raw)
+        # Accept {"items":[...]} or a bare [...]
+        if isinstance(data, dict):
+            data = data.get("items") or data.get("results") or list(data.values())[0]
+        if not isinstance(data, list):
+            raise ValueError(f"unexpected JSON shape: {type(data)}")
 
-        if data is not None:
-            result = []
-            for i, item in enumerate(items):
-                entry = data[i] if i < len(data) and isinstance(data[i], dict) else {}
-                result.append({
-                    "title_cn":   (entry.get("title_cn") or "").strip() or item["title"],
-                    "summary_cn": (entry.get("summary_cn") or "").strip() or item.get("description", ""),
-                })
-            return result
+        result = []
+        for i, item in enumerate(items):
+            entry = data[i] if i < len(data) and isinstance(data[i], dict) else {}
+            result.append({
+                "title_cn":   (entry.get("title_cn") or "").strip() or item["title"],
+                "summary_cn": (entry.get("summary_cn") or "").strip() or item.get("description", ""),
+            })
+        return result
 
-        # JSON completely unparseable — fall back to simple title-only translation
-        print(f"      ✗ JSON parse failed, retrying with simpler prompt...")
+    except Exception as e:
+        print(f"      ✗ JSON mode error: {e}, retrying with simple prompt...")
         titles_cn = _translate_titles_simple(items)
         return [
             {"title_cn": titles_cn[i], "summary_cn": item.get("description", "")}
             for i, item in enumerate(items)
         ]
-
-    except Exception as e:
-        print(f"      ✗ LLM error: {e}")
-        return fallback
 
 
 # ── HTML rendering ────────────────────────────────────────────────────────────

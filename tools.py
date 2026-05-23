@@ -92,6 +92,9 @@ def _bash_risk(command: str) -> str | None:
     if _STRICT and _WORKSPACE:
         for m in _WRITE_OPS.finditer(command):
             raw = m.group(1).strip().rstrip("'\"")
+            # /dev/null, /dev/stderr, /dev/stdout — safe kernel sinks, not real files
+            if raw.startswith("/dev/"):
+                continue
             raw = raw.replace("$HOME", str(Path.home())).replace("~", str(Path.home()))
             try:
                 target = Path(raw).expanduser().resolve()

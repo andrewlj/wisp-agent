@@ -1,16 +1,10 @@
 """
 wisp-agent daily briefing generator.
 
-Fetches news from RSS / sitemap / section-page sources, translates titles
-and writes Chinese summaries using the local LLM, then renders an HTML report.
-
-Improvements over the hermes version:
-  - 1 LLM call per section (translate + summarize combined, JSON output)
-  - <think>…</think> stripping for Qwen-family reasoning models
-  - Robust JSON extraction with English fallback
-  - Embedded HTML template — no external file dependency
-  - Section-level error isolation: one failure never blocks the rest
-  - Cross-section dedup (ict_research / ict_business) handled cleanly
+All section/source/filter configuration lives in briefing.yaml.
+This file handles only the processing pipeline:
+  RSS/page fetch → domain filter → content filter → dedup →
+  LLM translate+summarise → HTML render → open browser.
 """
 
 from __future__ import annotations
@@ -26,242 +20,52 @@ from urllib.parse import urlparse, urljoin
 from xml.etree import ElementTree
 import urllib.request
 
-import requests as _req  # already in wisp's venv
+import requests as _req
+import yaml as _yaml
 
-# ── Config (set once by agent.py via init_briefing) ──────────────────────────
+# ── Runtime config (set once by init_briefing) ───────────────────────────────
 
-_BASE_URL:   str        = ""
-_API_KEY:    str        = ""
-_MODEL:      str        = ""
+_BASE_URL:   str         = ""
+_API_KEY:    str         = ""
+_MODEL:      str         = ""
 _OUTPUT_DIR: Path | None = None
+_SECTIONS:   list[dict]  = []   # loaded from briefing.yaml
 
-_HISTORY_DAYS    = 7
-_MAX_ITEMS       = 5
-_MAX_CANDIDATES  = _MAX_ITEMS * 4
+_HISTORY_DAYS   = 7
+_MAX_ITEMS      = 5
+_MAX_CANDIDATES = _MAX_ITEMS * 4
 
 
-def init_briefing(base_url: str, api_key: str, model: str, workspace: str) -> None:
+def init_briefing(base_url: str, api_key: str, model: str, workspace: str,
+                  config_path: str | None = None) -> None:
     """Called once during agent startup."""
-    global _BASE_URL, _API_KEY, _MODEL, _OUTPUT_DIR
+    global _BASE_URL, _API_KEY, _MODEL, _OUTPUT_DIR, _SECTIONS
     _BASE_URL   = base_url
     _API_KEY    = api_key
     _MODEL      = model
     _OUTPUT_DIR = Path(workspace).expanduser().resolve() / "daily-report"
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    cfg_path    = Path(config_path) if config_path else Path(__file__).parent / "briefing.yaml"
+    _SECTIONS   = _load_sections(cfg_path)
 
 
-# ── Section metadata ──────────────────────────────────────────────────────────
+def _load_sections(path: Path) -> list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f"briefing config not found: {path}")
+    raw = _yaml.safe_load(path.read_text(encoding="utf-8"))
+    return raw.get("sections", [])
 
-SECTION_LABELS = {
-    "political":    "🌍 政治国际",
-    "ict_research": "💡 ICT 前沿研究",
-    "ict_business": "🏢 高科技企业",
-    "ireland":      "🇮🇪 爱尔兰新闻",
-    "china":        "🇨🇳 中国要闻",
-}
 
-SECTION_DIV_IDS = {
-    "political":    "political-international",
-    "ict_research": "ict-research-breakthroughs",
-    "ict_business": "ict-business-news",
-    "ireland":      "ireland-news",
-    "china":        "china-news",
-}
-
-ALL_SECTIONS = ["political", "ict_research", "ict_business", "ireland", "china"]
-
-# ── Domain whitelists ─────────────────────────────────────────────────────────
-
-_POL_DOMAINS = {
-    "reuters.com":  "Reuters",           "apnews.com":  "AP News",
-    "bbc.co.uk":    "BBC",               "bbc.com":     "BBC",
-    "ft.com":       "Financial Times",   "wsj.com":     "Wall Street Journal",
-}
-_ICT_DOMAINS = {
-    "technologyreview.com":  "MIT Technology Review",
-    "nature.com":            "Nature",
-    "spectrum.ieee.org":     "IEEE Spectrum",
-    "ieee.org":              "IEEE",
-    "sciencedaily.com":      "Science Daily",
-    "newscientist.com":      "New Scientist",
-    "huggingface.co":        "HuggingFace",
-    "deepmind.google":       "DeepMind",
-    "deepmind.com":          "DeepMind",
-    # kept for ict_business cross-filtering
-    "theverge.com":          "The Verge",
-    "arstechnica.com":       "Ars Technica",
-    "wired.com":             "Wired",
-}
-
-# Sources trusted to publish genuine research — pass filter without keyword check
-_ICT_R_TRUSTED = {
-    "MIT Technology Review", "Nature", "IEEE Spectrum", "IEEE",
-    "Science Daily", "HuggingFace", "DeepMind", "New Scientist",
-}
-_IRE_DOMAINS = {
-    "rte.ie":          "RTÉ",
-    "irishtimes.com":  "Irish Times",
-    "independent.ie":  "Irish Independent",
-    "thejournal.ie":   "The Journal",
-}
-_ENT_DOMAINS = {
-    "variety.com":           "Variety",
-    "hollywoodreporter.com": "Hollywood Reporter",
-    "billboard.com":         "Billboard",
-    "deadline.com":          "Deadline",
-    "rollingstone.com":      "Rolling Stone",
-}
-
-_SECTION_DOMAINS = {
-    "political":    _POL_DOMAINS,
-    "ict_research": _ICT_DOMAINS,
-    "ict_business": _ICT_DOMAINS,
-    "ireland":      _IRE_DOMAINS,
-    "china":        _POL_DOMAINS,
-}
-
-# ── Keyword filters ───────────────────────────────────────────────────────────
-
-_CHINA_KW = {
-    "china", "chinese", "beijing", "shanghai", "xi jinping", "prc", "cpc",
-    "huawei", "alibaba", "tencent", "bytedance", "sino", "renminbi", "yuan",
-    "belt and road", "taiwan", "hong kong", "xinjiang", "uyghur", "deepseek",
-    "li qiang", "pla", "pboc", "mainland china",
-}
-_CHINA_SIG = {
-    "tariff", "trade", "economy", "economic", "export", "manufacturing",
-    "policy", "sanction", "diplomat", "military", "ai", "chip", "semiconductor",
-    "tech", "acquisition", "market", "finance", "hong kong", "taiwan",
-}
-_CHINA_EXCL = {"panda", "restaurant", "food", "recipe", "travel", "tourism",
-               "concert", "nba", "sport", "wildlife"}
-
-_ICT_R_KW = {
-    "ai", "llm", "model", "agent", "gpu", "chip", "semiconductor", "quantum",
-    "robot", "robotics", "breakthrough", "research", "study", "scientists",
-    "inference", "training", "benchmark", "fusion", "battery",
-    "paper", "dataset", "open source", "open-source", "weights",
-    "architecture", "algorithm", "neural", "transformer", "diffusion",
-    "multimodal", "vision", "language model",
-    # broader science / non-AI research
-    "genetic", "biology", "protein", "climate", "drug", "medical", "physics",
-    "discovery", "experiment", "laboratory", "innovation",
-}
-# Must appear in title for non-trusted sources
-_ICT_R_TITLE_REQUIRED = {
-    "breakthrough", "research", "study", "scientists", "paper", "quantum",
-    "robotics", "benchmark", "dataset", "inference", "training",
-    "llm", "model", "open-source", "open source", "weights", "algorithm",
-    "neural", "transformer", "diffusion", "multimodal", "release",
-    "genetic", "protein", "discovery", "experiment",
-}
-# Hard commercial signals — reject unconditionally
-# Note: "review" intentionally excluded — "MIT Technology Review" is a source name
-_ICT_R_STRONG_BIZ_EXCL = {
-    "earnings", "ipo", "funding round", "acquisition", "merger", "layoff",
-    "lawsuit", "antitrust", "quarterly earnings", "annual report",
-    "promo code", "coupon", "gift guide", "shopping", "hands-on",
-    "preorder", "discount",
-}
-
-_ICT_B_KW = {
-    "openai", "microsoft", "google", "meta", "amazon", "anthropic", "nvidia",
-    "apple", "tesla", "xai", "oracle", "intel", "amd", "tsmc", "samsung",
-    "huawei", "bytedance", "tencent", "netflix", "databricks", "snowflake",
-    "musk", "altman", "earnings", "funding", "acquisition", "merger", "ipo",
-    "layoff", "launch", "antitrust", "lawsuit", "revenue", "profit",
-}
-_ICT_B_STRONG = {
-    "earnings", "funding", "acquisition", "merger", "ipo", "layoff",
-    "lawsuit", "antitrust", "revenue", "profit", "investment",
-}
-_ICT_B_EXCL = {
-    "promo code", "coupon", "gift guide", "shopping", "deal alert",
-    "memorial day", "prime day", "black friday", "cyber monday",
-    "best deals", "tech deals", "our picks", "hands-on review",
-}
-
-_IRE_KW = {
-    "ireland", "irish", "dublin", "cork", "galway", "limerick", "waterford",
-    "taoiseach", "dail", "fianna fail", "fine gael", "sinn fein",
-    "garda", "gardaí", "hse", "luas", "dart",
-}
-_IRE_SIG = {
-    "garda", "gardaí", "court", "crime", "police", "housing", "rent",
-    "hospital", "health", "hse", "school", "minister", "government",
-    "dail", "taoiseach", "transport", "consumer",
-    # election / political
-    "election", "vote", "voting", "tally", "count", "constituency",
-    "referendum", "budget", "tax", "party", "fine gael", "fianna fáil",
-    "sinn féin", "labour", "green party", "social democrats",
-    # public safety / justice
-    "drugs", "cocaine", "murder", "assault", "arrested", "trial", "sentence",
-    "flood", "fire", "emergency", "inquiry", "investigation",
-    # economy / social
-    "cost of living", "inflation", "wages", "workers", "strike", "protest",
-}
-_IRE_EXCL = {
-    "westlife", "property", "motoring", "car review",
-    # Removed global political terms (ukraine/russia/nato etc.) — they appear in
-    # legitimate Irish domestic news (e.g. Irish government statements on EU/NATO).
-    # URL-path filtering (_IRE_URL_INC / _IRE_URL_EXCL) already handles world news.
-}
-_IRE_URL_INC  = ("/news/ireland/", "/ireland/", "/irish-news/", "/news/dublin/",
-                 "/news/cork/", "/crime-law/courts/", "/housing/", "/health/")
-_IRE_URL_EXCL = ("/sport/", "/culture/", "/life-style/", "/style/", "/opinion/",
-                 "/world/", "/middle-east/", "/europe/", "/entertainment/",
-                 "/property/", "/motoring/")
-
-# ── Fetch sources ─────────────────────────────────────────────────────────────
-
-_SOURCES: dict[str, list[dict]] = {
-    "political": [
-        {"type": "rss",  "url": "https://feeds.bbci.co.uk/news/world/rss.xml",       "hostname": "bbc.co.uk"},
-        {"type": "rss",  "url": "https://feeds.bbci.co.uk/news/rss.xml",             "hostname": "bbc.co.uk"},
-        {"type": "page", "url": "https://apnews.com/world-news",                     "hostname": "apnews.com", "url_pattern": "/article/"},
-        {"type": "page", "url": "https://apnews.com/politics",                       "hostname": "apnews.com", "url_pattern": "/article/"},
-    ],
-    "ict_research": [
-        {"type": "rss", "url": "https://huggingface.co/blog/feed.xml",               "hostname": "huggingface.co"},
-        {"type": "rss", "url": "https://deepmind.google/blog/rss.xml",               "hostname": "deepmind.google"},
-        {"type": "rss", "url": "https://spectrum.ieee.org/feeds/feed.rss",           "hostname": "spectrum.ieee.org"},
-        {"type": "rss", "url": "https://www.technologyreview.com/topnews.rss",       "hostname": "technologyreview.com"},
-        {"type": "rss", "url": "https://www.nature.com/nature/news.rss",             "hostname": "nature.com"},
-        {"type": "rss", "url": "https://feeds.arstechnica.com/arstechnica/index",    "hostname": "arstechnica.com"},
-    ],
-    "ict_business": [
-        {"type": "rss", "url": "https://www.theverge.com/rss/index.xml",             "hostname": "theverge.com"},
-        {"type": "rss", "url": "https://feeds.arstechnica.com/arstechnica/index",    "hostname": "arstechnica.com"},
-        {"type": "rss", "url": "https://www.technologyreview.com/topnews.rss",       "hostname": "technologyreview.com"},
-        {"type": "rss", "url": "https://www.wired.com/feed/rss",                     "hostname": "wired.com"},
-    ],
-    "ireland": [
-        {"type": "rss",  "url": "https://www.rte.ie/news/rss/news-headlines.xml",    "hostname": "rte.ie"},
-        {"type": "rss",  "url": "https://www.thejournal.ie/feed/",                   "hostname": "thejournal.ie"},
-        {"type": "rss",  "url": "https://www.independent.ie/rss/",                   "hostname": "independent.ie"},
-        {"type": "rss",  "url": "https://www.irishtimes.com/arc/outboundfeeds/rss/", "hostname": "irishtimes.com"},
-        {"type": "page", "url": "https://www.rte.ie/news/ireland/",                  "hostname": "rte.ie", "url_pattern": "/news/ireland/"},
-    ],
-    "china": [
-        {"type": "page", "url": "https://www.bbc.com/news/world/asia/china",         "hostname": "bbc.com", "url_pattern": "/news/articles/"},
-        {"type": "rss",  "url": "https://feeds.bbci.co.uk/news/world/asia/rss.xml",  "hostname": "bbc.co.uk"},
-        {"type": "rss",  "url": "https://feeds.bbci.co.uk/news/world/rss.xml",       "hostname": "bbc.co.uk"},
-        {"type": "page", "url": "https://apnews.com/hub/china",                      "hostname": "apnews.com", "url_pattern": "/article/"},
-    ],
-}
-
-# ── URL utilities ─────────────────────────────────────────────────────────────
+# ── URL / text utilities ──────────────────────────────────────────────────────
 
 def _dedup_key(url: str) -> str:
-    """Canonical URL key for deduplication across days."""
-    p = urlparse(url)
+    p    = urlparse(url)
     host = (p.hostname or "").removeprefix("www.")
     host = re.sub(r"bbc\.co\.\w+$", "bbc.com", host)
     return host + p.path.rstrip("/")
 
 
 def _is_article_url(url: str) -> bool:
-    """Reject homepages, section pages, and paginated URLs."""
     path = urlparse(url).path.rstrip("/")
     if not path:
         return False
@@ -319,12 +123,12 @@ def _entry_link(entry) -> str:
     return ""
 
 
-def _has_any(text: str, kws: set) -> bool:
+def _has_any(text: str, kws: set | list) -> bool:
     t = text.lower()
     return any(k in t for k in kws)
 
 
-def _count(text: str, kws: set) -> int:
+def _count(text: str, kws: set | list) -> int:
     t = text.lower()
     return sum(1 for k in kws if k in t)
 
@@ -335,68 +139,104 @@ def _item_text(item: dict) -> str:
         item.get("url", ""),   item.get("source", ""),
     ])).lower()
 
-# ── Content filters ───────────────────────────────────────────────────────────
 
-def _keep_ict_research(item: dict) -> bool:
-    text  = _item_text(item)
-    title = item.get("title", "").lower()
-    # Always reject hard commercial/lifestyle signals
-    if _has_any(text, _ICT_R_STRONG_BIZ_EXCL):
-        return False
-    # Trusted research outlets: pass everything without strong biz signals
-    if item.get("source") in _ICT_R_TRUSTED:
-        return True
-    # General tech outlets: require a research/science signal in the title
-    return _has_any(title, _ICT_R_TITLE_REQUIRED) and _count(text, _ICT_R_KW) >= 1
+# ── Generic content filter ────────────────────────────────────────────────────
 
+def _apply_filter(item: dict, f: dict) -> bool:
+    """Apply filter config `f` to `item`. Returns True if the item should be kept.
 
-_ICT_B_TECH_SOURCES = {"The Verge", "Wired", "Ars Technica", "MIT Technology Review"}
+    Filter evaluation order:
+      1. url_excl         — URL path exclusions (always applied first)
+      2. excl_keywords    — any match → reject
+      3. strong_keywords  — any match → pass immediately
+      4. trusted_sources  — source name in list → pass immediately
+      5. title_required   — at least one keyword must appear in title
+      6. prefer_sources   — relaxed threshold for named sources
+      7. title_bypass     — strong title signal skips sig_min check
+      8. local_min        — minimum local_keywords hits in full item text
+      9. title_min        — minimum local_keywords hits in title
+      10. sig_min         — minimum sig_keywords hits in full item text
+    """
+    if not f:
+        return True   # empty filter config → pass everything
 
-def _keep_ict_business(item: dict) -> bool:
     text   = _item_text(item)
     title  = item.get("title", "").lower()
+    url    = item.get("url",   "").lower()
     source = item.get("source", "")
-    if _has_any(text, _ICT_B_EXCL):
+
+    # 1. URL path exclusions
+    for p in f.get("url_excl", []):
+        if p in url:
+            return False
+
+    # 2. Keyword exclusions
+    excl_kw = f.get("excl_keywords", [])
+    if excl_kw and _has_any(text, excl_kw):
         return False
-    if _count(text, _ICT_B_STRONG) >= 1:
+
+    # 3. Strong signals → pass immediately
+    strong_kw = f.get("strong_keywords", [])
+    if strong_kw and _count(text, strong_kw) >= 1:
         return True
-    # Known tech media: lower bar — 1 keyword hit in title is enough
-    if source in _ICT_B_TECH_SOURCES and _has_any(title, _ICT_B_KW):
+
+    # 4. Trusted sources → pass immediately
+    if source in set(f.get("trusted_sources", [])):
         return True
-    return _count(text, _ICT_B_KW) >= 2 and _has_any(title, _ICT_B_KW)
 
+    local_kw  = f.get("local_keywords",  [])
+    sig_kw    = f.get("sig_keywords",    [])
+    title_req = f.get("title_required",  [])
+    url_inc   = f.get("url_inc",         [])
+    local_min = int(f.get("local_min",           0))
+    title_min = int(f.get("title_min",           0))
+    sig_min   = int(f.get("sig_min",             0))
+    title_byp = int(f.get("title_bypass_count",  0))
 
-def _keep_ireland(item: dict) -> bool:
-    text = _item_text(item)
-    url  = item.get("url", "").lower()
-    if any(p in url for p in _IRE_URL_EXCL):
-        return False
-    if _has_any(text, _IRE_EXCL):
-        return False
-    local = any(p in url for p in _IRE_URL_INC) or _has_any(text, _IRE_KW)
-    sig   = _has_any(text, _IRE_SIG)
-    return local and sig
-
-
-def _keep_china(item: dict) -> bool:
-    text  = _item_text(item)
-    title = item.get("title", "").lower()
-    if _has_any(text, _CHINA_EXCL):
-        return False
-    title_hits = _count(title, _CHINA_KW)
-    text_hits  = _count(text,  _CHINA_KW)
-    sig_hits   = _count(text,  _CHINA_SIG)
-    # Strong title signal (2+ China keywords) → bypass sig requirement
-    # (BBC RSS descriptions can be too short to accumulate sig_hits)
-    if title_hits >= 2:
+    # No further keyword config → pass
+    if not local_kw and not sig_kw and not title_req:
         return True
-    return (title_hits >= 1 or text_hits >= 2) and sig_hits >= 1
+
+    # 5. title_required: at least one must appear in title
+    if title_req and not _has_any(title, title_req):
+        return False
+
+    # 6. prefer_sources: apply relaxed thresholds
+    prefer_sources   = set(f.get("prefer_sources", []))
+    prefer_title_min = int(f.get("prefer_title_min", 1))
+    prefer_local_min = int(f.get("prefer_local_min", 0))
+    if source in prefer_sources:
+        title_ok = _count(title, local_kw) >= prefer_title_min if prefer_title_min > 0 else True
+        local_ok = _count(text,  local_kw) >= prefer_local_min if prefer_local_min > 0 else True
+        return title_ok and local_ok
+
+    # 7. title_bypass: strong title signal skips sig_min check
+    if title_byp > 0 and local_kw:
+        if _count(title, local_kw) >= title_byp:
+            return True
+
+    # 8. local_min (URL path match counts as a local hit)
+    url_match = any(p in url for p in url_inc)
+    if local_min > 0 and not url_match:
+        if _count(text, local_kw) < local_min:
+            return False
+
+    # 9. title_min
+    if title_min > 0 and local_kw:
+        if _count(title, local_kw) < title_min:
+            return False
+
+    # 10. sig_min
+    if sig_min > 0 and sig_kw:
+        if _count(text, sig_kw) < sig_min:
+            return False
+
+    return True
 
 
 # ── History dedup ─────────────────────────────────────────────────────────────
 
 def _load_history_keys() -> set[str]:
-    """Extract article URL keys from the past N days of HTML reports."""
     if _OUTPUT_DIR is None:
         return set()
     keys: set[str] = set()
@@ -418,7 +258,7 @@ def _load_history_keys() -> set[str]:
 def _cleanup_old_reports() -> None:
     if _OUTPUT_DIR is None:
         return
-    cutoff = date.today() - timedelta(days=_HISTORY_DAYS)
+    cutoff  = date.today() - timedelta(days=_HISTORY_DAYS)
     removed = 0
     for f in _OUTPUT_DIR.glob("daily-report-????????.html"):
         m = re.fullmatch(r"daily-report-(\d{4})(\d{2})(\d{2})\.html", f.name)
@@ -435,7 +275,7 @@ def _cleanup_old_reports() -> None:
         print(f"    cleaned up {removed} old report(s)")
 
 
-# ── RSS / sitemap / page fetchers ─────────────────────────────────────────────
+# ── RSS / page fetchers ───────────────────────────────────────────────────────
 
 def _fetch_rss(feed_url: str, source_name: str) -> list[dict]:
     try:
@@ -499,9 +339,9 @@ def _fetch_page(page_url: str, source_name: str, url_pattern: str = "") -> list[
     items = []
     for href, anchor in re.findall(
         r"<a\b[^>]*href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
-        raw, flags=re.I | re.S
+        raw, flags=re.I | re.S,
     ):
-        link = urljoin(page_url, href.strip())
+        link  = urljoin(page_url, href.strip())
         if url_pattern and url_pattern not in link:
             continue
         title = _clean(anchor)
@@ -515,20 +355,22 @@ def _fetch_page(page_url: str, source_name: str, url_pattern: str = "") -> list[
 
 # ── Section fetcher ───────────────────────────────────────────────────────────
 
-def _fetch_section(section: str, history_keys: set[str],
-                   per_source_cap: int = _MAX_ITEMS) -> list[dict]:
+def _fetch_section(sec_cfg: dict, history_keys: set[str]) -> list[dict]:
     """Collect, filter, and deduplicate candidates for one section.
 
-    per_source_cap: max candidates taken from any single source outlet,
-    preventing one prolific feed from crowding out the rest.
+    Uses per_source_cap from sec_cfg to prevent one prolific feed from
+    crowding out others.  Content filter is applied after collection.
     """
-    domains      = _SECTION_DOMAINS[section]
-    seen: set[str]          = set()
-    source_counts: dict[str, int] = {}
-    candidates: list[dict]  = []
+    domains      = sec_cfg.get("domains", {})
+    filter_cfg   = sec_cfg.get("filter",  {})
+    per_src_cap  = int(sec_cfg.get("per_source_cap", _MAX_ITEMS))
 
-    for src in _SOURCES.get(section, []):
-        host_hint   = src["hostname"]
+    seen: dict[str, int]   = {}   # label → count
+    deduped: set[str]      = set()
+    candidates: list[dict] = []
+
+    for src in sec_cfg.get("sources", []):
+        host_hint   = src.get("hostname", "")
         source_name = domains.get(host_hint) or host_hint
 
         if src["type"] == "rss":
@@ -549,14 +391,13 @@ def _fetch_section(section: str, history_keys: set[str],
             label = _domain_source(item["hostname"], domains)
             if not label:
                 continue
-            # Per-source cap: stop taking more from this outlet once reached
-            if source_counts.get(label, 0) >= per_source_cap:
+            if seen.get(label, 0) >= per_src_cap:
                 continue
             key = _dedup_key(url_clean)
-            if key in seen or key in history_keys:
+            if key in deduped or key in history_keys:
                 continue
-            seen.add(key)
-            source_counts[label] = source_counts.get(label, 0) + 1
+            deduped.add(key)
+            seen[label] = seen.get(label, 0) + 1
             candidates.append({
                 **item,
                 "title":       (item["title"] or label).strip(),
@@ -568,32 +409,16 @@ def _fetch_section(section: str, history_keys: set[str],
         if len(candidates) >= _MAX_CANDIDATES:
             break
 
-    # Apply section-specific content filters
-    if section == "ict_research":
-        candidates = [c for c in candidates if _keep_ict_research(c)]
-    elif section == "ict_business":
-        candidates = [c for c in candidates if _keep_ict_business(c)]
-    elif section == "ireland":
-        candidates = [c for c in candidates if _keep_ireland(c)]
-    elif section == "china":
-        candidates = [c for c in candidates if _keep_china(c)]
-
-    return candidates[:_MAX_ITEMS]
+    return [c for c in candidates if _apply_filter(c, filter_cfg)][:_MAX_ITEMS]
 
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
 def _strip_thinking(text: str) -> str:
-    """Remove <think>…</think> blocks produced by Qwen reasoning models."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def _call_llm(prompt: str, max_tokens: int = 2048, json_mode: bool = False) -> str:
-    """Synchronous non-streaming LLM call via wisp's configured endpoint.
-
-    json_mode=True adds response_format=json_object, forcing the server to
-    output valid JSON (supported by omlx / OpenAI-compatible servers).
-    """
     payload: dict = {
         "model":      _MODEL,
         "messages":   [{"role": "user", "content": prompt}],
@@ -613,19 +438,13 @@ def _call_llm(prompt: str, max_tokens: int = 2048, json_mode: bool = False) -> s
 
 
 def _clean_llm_output(raw: str) -> str:
-    """Strip thinking tags and markdown fences from LLM output."""
     text = _strip_thinking(raw)
-    # Remove ```json ... ``` or ``` ... ``` fences
     text = re.sub(r"```(?:json)?\s*", "", text)
-    text = text.replace("```", "").strip()
-    return text
+    return text.replace("```", "").strip()
 
 
 def _fix_json(s: str) -> str:
-    """Fix the most common LLM JSON mistakes."""
-    # Trailing commas before ] or }
     s = re.sub(r",\s*([}\]])", r"\1", s)
-    # Python-style None/True/False
     s = re.sub(r"\bNone\b",  "null",  s)
     s = re.sub(r"\bTrue\b",  "true",  s)
     s = re.sub(r"\bFalse\b", "false", s)
@@ -633,7 +452,6 @@ def _fix_json(s: str) -> str:
 
 
 def _try_json_loads(s: str):
-    """Try json.loads; on failure try after _fix_json. Returns parsed object or raises."""
     try:
         return json.loads(s)
     except json.JSONDecodeError:
@@ -641,37 +459,21 @@ def _try_json_loads(s: str):
 
 
 def _parse_llm_json(raw: str) -> list[dict] | None:
-    """Multi-strategy extraction of a JSON array from LLM output.
-
-    Strategies (in order):
-    1. Parse the whole cleaned text directly.
-    2. Extract the first [...] block via regex, parse that.
-    3. Same block after _fix_json.
-    4. Extract individual {...} objects and reassemble.
-    Returns None if all strategies fail.
-    """
     text = _clean_llm_output(raw)
-
-    # Strategy 1: direct parse
     try:
         data = _try_json_loads(text)
         if isinstance(data, list):
             return data
     except (json.JSONDecodeError, ValueError):
         pass
-
-    # Strategy 2 & 3: extract first [...] block
     m = re.search(r"\[.*\]", text, re.DOTALL)
     if m:
-        block = m.group(0)
         try:
-            data = _try_json_loads(block)
+            data = _try_json_loads(m.group(0))
             if isinstance(data, list):
                 return data
         except (json.JSONDecodeError, ValueError):
             pass
-
-    # Strategy 4: extract individual {...} objects
     objects = re.findall(r'\{[^{}]+\}', text, re.DOTALL)
     if objects:
         result = []
@@ -682,45 +484,20 @@ def _parse_llm_json(raw: str) -> list[dict] | None:
                 pass
         if result:
             return result
-
     return None
 
 
-def _translate_titles_simple(items: list[dict]) -> list[str]:
-    """Fallback: numbered-list translation (simpler format, more reliable)."""
-    numbered = "\n".join(f"{i+1}. {item['title']}" for i, item in enumerate(items))
-    prompt = (
-        "Translate each English headline to Simplified Chinese. "
-        "Output ONLY numbered lines in the same order, nothing else.\n\n"
-        + numbered
-    )
-    try:
-        raw   = _call_llm(prompt, max_tokens=512)
-        text  = _clean_llm_output(raw)
-        lines = [re.sub(r"^\d+[.)、]\s*", "", ln).strip()
-                 for ln in text.splitlines() if ln.strip()]
-        lines = [ln for ln in lines if ln]
-        # Pad or truncate to match item count
-        while len(lines) < len(items):
-            lines.append(items[len(lines)]["title"])
-        return lines[:len(items)]
-    except Exception:
-        return [item["title"] for item in items]
-
-
-_TRANSLATE_BATCH = 3   # items per LLM call — keeps token count low and count reliable
-
-
 def _is_english(text: str) -> bool:
-    """Return True if the text looks like untranslated English (>65% ASCII alpha chars)."""
     alpha = [c for c in text if c.isalpha()]
     if not alpha:
         return False
     return sum(1 for c in alpha if c.isascii()) / len(alpha) > 0.65
 
 
+_TRANSLATE_BATCH = 3
+
+
 def _translate_batch(items: list[dict]) -> list[dict]:
-    """Translate + summarise one small batch. Returns list of {title_cn, summary_cn}."""
     n        = len(items)
     fallback = [{"title_cn": item["title"], "summary_cn": item.get("description", "")}
                 for item in items]
@@ -754,21 +531,14 @@ def _translate_batch(items: list[dict]) -> list[dict]:
             entry      = data[i] if i < len(data) and isinstance(data[i], dict) else {}
             title_cn   = str(entry.get("title_cn")   or "").strip()
             summary_cn = str(entry.get("summary_cn") or "").strip()
-
-            # Translation failed → keep original title
             if not title_cn or _is_english(title_cn):
                 title_cn = item["title"]
-
-            # Degenerate summary → fall back to RSS description
             if not summary_cn or re.match(r"^[\d\s.,/%-]+$", summary_cn) or len(summary_cn) < 15:
                 summary_cn = item.get("description", "")
-
             result.append({"title_cn": title_cn, "summary_cn": summary_cn})
 
-        # Pad if LLM returned fewer items than requested
         while len(result) < n:
             result.append(fallback[len(result)])
-
         return result
 
     except Exception as e:
@@ -777,7 +547,6 @@ def _translate_batch(items: list[dict]) -> list[dict]:
 
 
 def _translate_and_summarize(items: list[dict]) -> list[dict]:
-    """Translate + summarise all items in batches of _TRANSLATE_BATCH."""
     if not items:
         return []
     result = []
@@ -793,7 +562,7 @@ def _esc(s: str) -> str:
              .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def _render_section(items: list[dict], translated: list[dict]) -> str:
+def _render_section_body(items: list[dict], translated: list[dict]) -> str:
     if not items:
         return '<div class="empty-state">暂无内容</div>'
     parts = []
@@ -812,8 +581,6 @@ def _render_section(items: list[dict], translated: list[dict]) -> str:
         )
     return "\n".join(parts)
 
-
-# ── Embedded HTML template ────────────────────────────────────────────────────
 
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
@@ -853,20 +620,41 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
     <h1>📰 每日晨报</h1>
     <div class="date">{{REPORT_DATE}}</div>
   </div>
-  <div class="section"><h2>🌍 政治国际</h2><div id="political-international"></div></div>
-  <div class="section"><h2>💡 ICT 前沿研究与技术突破</h2><div id="ict-research-breakthroughs"></div></div>
-  <div class="section"><h2>🏢 高科技企业重大新闻</h2><div id="ict-business-news"></div></div>
-  <div class="section"><h2>🇮🇪 爱尔兰新闻</h2><div id="ireland-news"></div></div>
-  <div class="section"><h2>🇨🇳 中国要闻</h2><div id="china-news"></div></div>
-  <div class="footer">
-    wisp-agent · 自动生成 ·
-    数据来源：Reuters · AP · BBC · FT · WSJ · Nature · IEEE · MIT TR ·
-    The Verge · Ars Technica · Wired · RTÉ · Irish Times · Irish Independent · The Journal
-  </div>
+  {{SECTIONS_HTML}}
+  <div class="footer">{{FOOTER_TEXT}}</div>
 </div>
 </body>
 </html>
 """
+
+
+def _build_sections_html(active: list[dict], sections_data: dict, sections_t: dict) -> str:
+    parts = []
+    for sec in active:
+        sid   = sec["id"]
+        label = sec["label"]
+        did   = sec["div_id"]
+        body  = _render_section_body(sections_data.get(sid, []), sections_t.get(sid, []))
+        parts.append(
+            f'  <div class="section">'
+            f'<h2>{_esc(label)}</h2>'
+            f'<div id="{_esc(did)}">{body}</div>'
+            f'</div>'
+        )
+    return "\n".join(parts)
+
+
+def _build_footer(sections: list[dict]) -> str:
+    # Collect all unique source names from domains across all sections
+    seen: dict[str, bool] = {}
+    names = []
+    for sec in sections:
+        for name in sec.get("domains", {}).values():
+            if name not in seen:
+                seen[name] = True
+                names.append(name)
+    sources_str = " · ".join(names) if names else ""
+    return f"wisp-agent · 自动生成 · 数据来源：{sources_str}"
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -878,79 +666,68 @@ def generate_report(
     """Generate the daily briefing HTML.  Returns the output file path."""
     if _OUTPUT_DIR is None:
         raise RuntimeError("briefing not initialized — call init_briefing() first")
+    if not _SECTIONS:
+        raise RuntimeError("no sections configured — check briefing.yaml")
 
-    active = [s for s in ALL_SECTIONS if s in (sections or ALL_SECTIONS)]
-    today  = date.today()
-    out    = _OUTPUT_DIR / f"daily-report-{today.strftime('%Y%m%d')}.html"
+    # Filter to requested sections (or all)
+    requested = set(sections) if sections else None
+    active    = [s for s in _SECTIONS if requested is None or s["id"] in requested]
+    today     = date.today()
+    out       = _OUTPUT_DIR / f"daily-report-{today.strftime('%Y%m%d')}.html"
 
     print(f"  generating daily briefing  ({len(active)} sections)...")
 
     # ── 1. history dedup ──────────────────────────────────────────────────────
     history_keys = _load_history_keys()
 
-    # Per-source cap: each source outlet contributes at most N candidates,
-    # ensuring all feed sources get representation before filtering.
-    # ireland=3 because its keyword filter is strict and needs more raw candidates.
-    _per_source_cap = {
-        "political":    2,
-        "ict_research": 2,
-        # ict_business: cap raised so content filter sees enough candidates
-        # (The Verge/Wired/Ars mix useful articles in with lifestyle/deals)
-        "ict_business": 5,
-        "ireland":      3,
-        # China sources (BBC World, BBC Asia) are mixed feeds — need a higher raw
-        # candidate pool so the _keep_china filter has enough to work with.
-        "china":        8,
-    }
-
-    # ── 2. fetch all sections (isolated per-section) ──────────────────────────
+    # ── 2. fetch all sections ─────────────────────────────────────────────────
     sections_data: dict[str, list[dict]] = {}
-    for section in active:
-        label = SECTION_LABELS[section]
+    for sec in active:
+        label = sec["label"]
         print(f"  → {label}")
         try:
-            cap   = _per_source_cap.get(section, _MAX_ITEMS)
-            items = _fetch_section(section, history_keys, per_source_cap=cap)
+            items = _fetch_section(sec, history_keys)
             print(f"     {len(items)} articles")
         except Exception as e:
             print(f"     ✗ fetch error: {e}")
             items = []
-        sections_data[section] = items
+        sections_data[sec["id"]] = items
 
-    # ── 3. cross-section dedup: ict_research wins over ict_business ──────────
-    if "ict_research" in sections_data and "ict_business" in sections_data:
-        research_keys = {_dedup_key(i["url"]) for i in sections_data["ict_research"]}
-        sections_data["ict_business"] = [
-            i for i in sections_data["ict_business"]
-            if _dedup_key(i["url"]) not in research_keys
-        ][:_MAX_ITEMS]
+    # ── 3. cross-section dedup: earlier sections win ──────────────────────────
+    seen_keys: set[str] = set()
+    for sec in active:
+        sid        = sec["id"]
+        before     = sections_data[sid]
+        after      = [i for i in before if _dedup_key(i["url"]) not in seen_keys][:_MAX_ITEMS]
+        seen_keys |= {_dedup_key(i["url"]) for i in after}
+        sections_data[sid] = after
 
-    # ── 4. translate + summarize (1 LLM call per section) ─────────────────────
+    # ── 4. translate + summarise ──────────────────────────────────────────────
     print(f"\n  translating & summarizing...")
     sections_t: dict[str, list[dict]] = {}
-    for section in active:
-        items = sections_data.get(section, [])
+    for sec in active:
+        sid   = sec["id"]
+        items = sections_data.get(sid, [])
         if not items:
-            sections_t[section] = []
+            sections_t[sid] = []
             continue
-        print(f"  → {SECTION_LABELS[section]}")
-        sections_t[section] = _translate_and_summarize(items)
+        print(f"  → {sec['label']}")
+        sections_t[sid] = _translate_and_summarize(items)
 
-    # ── 5. render HTML ─────────────────────────────────────────────────────────
+    # ── 5. render HTML ────────────────────────────────────────────────────────
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    date_str  = f"{today.year}年{today.month}月{today.day}日 {weekdays[today.weekday()]}"
-    tpl = _HTML_TEMPLATE.replace("{{REPORT_DATE}}", date_str)
+    date_str = f"{today.year}年{today.month}月{today.day}日 {weekdays[today.weekday()]}"
 
-    for section in ALL_SECTIONS:
-        div_id = SECTION_DIV_IDS[section]
-        items  = sections_data.get(section, [])
-        trans  = sections_t.get(section, [])
-        tpl    = tpl.replace(f'<div id="{div_id}"></div>', _render_section(items, trans))
-
-    out.write_text(tpl, encoding="utf-8")
+    html = (
+        _HTML_TEMPLATE
+        .replace("{{REPORT_DATE}}",   date_str)
+        .replace("{{SECTIONS_HTML}}", _build_sections_html(active, sections_data, sections_t))
+        .replace("{{FOOTER_TEXT}}",   _build_footer(active))
+    )
+    out.write_text(html, encoding="utf-8")
     _cleanup_old_reports()
 
-    total = sum(len(v) for v in sections_data.values())
+    total  = sum(len(v) for v in sections_data.values())
     result = f"ok: daily briefing saved → {out}\n    {len(active)} sections · {total} articles"
     print(f"\n  ✓ {out}")
 

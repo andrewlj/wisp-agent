@@ -1,0 +1,443 @@
+# wisp daily briefing — news sources and filter configuration
+# Edit this file to add/remove sections, swap sources, or tune filters.
+# briefing.py reads this at startup; no Python changes needed for new sections.
+#
+# Filter fields (all optional):
+#   trusted_sources:   list of source names that pass without keyword checks
+#   excl_keywords:     any match → reject
+#   strong_keywords:   any match → pass immediately (after excl check)
+#   prefer_sources:    sources with a lower keyword threshold
+#   prefer_title_min:  min local_keyword hits in title for prefer_sources (default 1)
+#   prefer_local_min:  min local_keyword hits in text for prefer_sources (default 0)
+#   title_required:    non-trusted sources must have at least one of these in title
+#   title_bypass_count: if title hits >= N, skip sig_min check (0 = disabled)
+#   url_inc:           URL path inclusion patterns (counts as local match)
+#   url_excl:          URL path exclusion patterns (applied first)
+#   local_keywords:    primary keyword pool
+#   sig_keywords:      secondary "significance" keyword pool
+#   local_min:         min local_keywords hits required (default 0 = no check)
+#   title_min:         min local_keywords hits in title required (default 0)
+#   sig_min:           min sig_keywords hits required (default 0)
+
+sections:
+
+  - id: political
+    label: "🌍 政治国际"
+    div_id: "political-international"
+    per_source_cap: 2
+    sources:
+      - {type: rss,  url: "https://feeds.bbci.co.uk/news/world/rss.xml",   hostname: "bbc.co.uk"}
+      - {type: rss,  url: "https://feeds.bbci.co.uk/news/rss.xml",         hostname: "bbc.co.uk"}
+      - {type: page, url: "https://apnews.com/world-news",                 hostname: "apnews.com", url_pattern: "/article/"}
+      - {type: page, url: "https://apnews.com/politics",                   hostname: "apnews.com", url_pattern: "/article/"}
+    domains:
+      "reuters.com": "Reuters"
+      "apnews.com":  "AP News"
+      "bbc.co.uk":   "BBC"
+      "bbc.com":     "BBC"
+      "ft.com":      "Financial Times"
+      "wsj.com":     "Wall Street Journal"
+    filter: {}   # no content filter — all domain-matched articles pass
+
+  - id: ict_research
+    label: "💡 ICT 前沿研究"
+    div_id: "ict-research-breakthroughs"
+    per_source_cap: 2
+    sources:
+      - {type: rss, url: "https://huggingface.co/blog/feed.xml",            hostname: "huggingface.co"}
+      - {type: rss, url: "https://deepmind.google/blog/rss.xml",            hostname: "deepmind.google"}
+      - {type: rss, url: "https://spectrum.ieee.org/feeds/feed.rss",        hostname: "spectrum.ieee.org"}
+      - {type: rss, url: "https://www.technologyreview.com/topnews.rss",    hostname: "technologyreview.com"}
+      - {type: rss, url: "https://www.nature.com/nature/news.rss",          hostname: "nature.com"}
+      - {type: rss, url: "https://feeds.arstechnica.com/arstechnica/index", hostname: "arstechnica.com"}
+    domains:
+      "technologyreview.com": "MIT Technology Review"
+      "nature.com":           "Nature"
+      "spectrum.ieee.org":    "IEEE Spectrum"
+      "ieee.org":             "IEEE"
+      "sciencedaily.com":     "Science Daily"
+      "newscientist.com":     "New Scientist"
+      "huggingface.co":       "HuggingFace"
+      "deepmind.google":      "DeepMind"
+      "deepmind.com":         "DeepMind"
+      "theverge.com":         "The Verge"
+      "arstechnica.com":      "Ars Technica"
+      "wired.com":            "Wired"
+    filter:
+      trusted_sources:
+        - "MIT Technology Review"
+        - "Nature"
+        - "IEEE Spectrum"
+        - "IEEE"
+        - "Science Daily"
+        - "HuggingFace"
+        - "DeepMind"
+        - "New Scientist"
+      excl_keywords:
+        - "earnings"
+        - "ipo"
+        - "funding round"
+        - "acquisition"
+        - "merger"
+        - "layoff"
+        - "lawsuit"
+        - "antitrust"
+        - "quarterly earnings"
+        - "annual report"
+        - "promo code"
+        - "coupon"
+        - "gift guide"
+        - "shopping"
+        - "hands-on"
+        - "preorder"
+        - "discount"
+      title_required:
+        - "breakthrough"
+        - "research"
+        - "study"
+        - "scientists"
+        - "paper"
+        - "quantum"
+        - "robotics"
+        - "benchmark"
+        - "dataset"
+        - "inference"
+        - "training"
+        - "llm"
+        - "model"
+        - "open-source"
+        - "open source"
+        - "weights"
+        - "algorithm"
+        - "neural"
+        - "transformer"
+        - "diffusion"
+        - "multimodal"
+        - "release"
+        - "genetic"
+        - "protein"
+        - "discovery"
+        - "experiment"
+      local_keywords:
+        - "ai"
+        - "llm"
+        - "model"
+        - "agent"
+        - "gpu"
+        - "chip"
+        - "semiconductor"
+        - "quantum"
+        - "robot"
+        - "robotics"
+        - "breakthrough"
+        - "research"
+        - "study"
+        - "scientists"
+        - "inference"
+        - "training"
+        - "benchmark"
+        - "fusion"
+        - "battery"
+        - "paper"
+        - "dataset"
+        - "open source"
+        - "open-source"
+        - "weights"
+        - "architecture"
+        - "algorithm"
+        - "neural"
+        - "transformer"
+        - "diffusion"
+        - "multimodal"
+        - "vision"
+        - "language model"
+        - "genetic"
+        - "biology"
+        - "protein"
+        - "climate"
+        - "drug"
+        - "medical"
+        - "physics"
+        - "discovery"
+        - "experiment"
+        - "laboratory"
+        - "innovation"
+      local_min: 1
+      sig_min: 0
+
+  - id: ict_business
+    label: "🏢 高科技企业"
+    div_id: "ict-business-news"
+    per_source_cap: 5
+    sources:
+      - {type: rss, url: "https://www.theverge.com/rss/index.xml",             hostname: "theverge.com"}
+      - {type: rss, url: "https://feeds.arstechnica.com/arstechnica/index",    hostname: "arstechnica.com"}
+      - {type: rss, url: "https://www.technologyreview.com/topnews.rss",       hostname: "technologyreview.com"}
+      - {type: rss, url: "https://www.wired.com/feed/rss",                     hostname: "wired.com"}
+    domains:
+      "technologyreview.com": "MIT Technology Review"
+      "theverge.com":         "The Verge"
+      "arstechnica.com":      "Ars Technica"
+      "wired.com":            "Wired"
+    filter:
+      excl_keywords:
+        - "promo code"
+        - "coupon"
+        - "gift guide"
+        - "shopping"
+        - "deal alert"
+        - "memorial day"
+        - "prime day"
+        - "black friday"
+        - "cyber monday"
+        - "best deals"
+        - "tech deals"
+        - "our picks"
+        - "hands-on review"
+      strong_keywords:
+        - "earnings"
+        - "funding"
+        - "acquisition"
+        - "merger"
+        - "ipo"
+        - "layoff"
+        - "lawsuit"
+        - "antitrust"
+        - "revenue"
+        - "profit"
+        - "investment"
+      prefer_sources:
+        - "The Verge"
+        - "Wired"
+        - "Ars Technica"
+        - "MIT Technology Review"
+      prefer_title_min: 1
+      prefer_local_min: 0
+      local_keywords:
+        - "openai"
+        - "microsoft"
+        - "google"
+        - "meta"
+        - "amazon"
+        - "anthropic"
+        - "nvidia"
+        - "apple"
+        - "tesla"
+        - "xai"
+        - "oracle"
+        - "intel"
+        - "amd"
+        - "tsmc"
+        - "samsung"
+        - "huawei"
+        - "bytedance"
+        - "tencent"
+        - "netflix"
+        - "databricks"
+        - "snowflake"
+        - "musk"
+        - "altman"
+        - "earnings"
+        - "funding"
+        - "acquisition"
+        - "merger"
+        - "ipo"
+        - "layoff"
+        - "launch"
+        - "antitrust"
+        - "lawsuit"
+        - "revenue"
+        - "profit"
+      local_min: 2
+      title_min: 1
+      sig_min: 0
+
+  - id: ireland
+    label: "🇮🇪 爱尔兰新闻"
+    div_id: "ireland-news"
+    per_source_cap: 3
+    sources:
+      - {type: rss,  url: "https://www.rte.ie/news/rss/news-headlines.xml",    hostname: "rte.ie"}
+      - {type: rss,  url: "https://www.thejournal.ie/feed/",                   hostname: "thejournal.ie"}
+      - {type: rss,  url: "https://www.independent.ie/rss/",                   hostname: "independent.ie"}
+      - {type: rss,  url: "https://www.irishtimes.com/arc/outboundfeeds/rss/", hostname: "irishtimes.com"}
+      - {type: page, url: "https://www.rte.ie/news/ireland/",                  hostname: "rte.ie", url_pattern: "/news/ireland/"}
+    domains:
+      "rte.ie":         "RTÉ"
+      "irishtimes.com": "Irish Times"
+      "independent.ie": "Irish Independent"
+      "thejournal.ie":  "The Journal"
+    filter:
+      excl_keywords:
+        - "westlife"
+        - "property"
+        - "motoring"
+        - "car review"
+      url_excl:
+        - "/sport/"
+        - "/culture/"
+        - "/life-style/"
+        - "/style/"
+        - "/opinion/"
+        - "/world/"
+        - "/middle-east/"
+        - "/europe/"
+        - "/entertainment/"
+        - "/property/"
+        - "/motoring/"
+      url_inc:
+        - "/news/ireland/"
+        - "/ireland/"
+        - "/irish-news/"
+        - "/news/dublin/"
+        - "/news/cork/"
+        - "/crime-law/courts/"
+        - "/housing/"
+        - "/health/"
+      local_keywords:
+        - "ireland"
+        - "irish"
+        - "dublin"
+        - "cork"
+        - "galway"
+        - "limerick"
+        - "waterford"
+        - "taoiseach"
+        - "dail"
+        - "fianna fail"
+        - "fine gael"
+        - "sinn fein"
+        - "garda"
+        - "gardaí"
+        - "hse"
+        - "luas"
+        - "dart"
+      sig_keywords:
+        - "garda"
+        - "gardaí"
+        - "court"
+        - "crime"
+        - "police"
+        - "housing"
+        - "rent"
+        - "hospital"
+        - "health"
+        - "hse"
+        - "school"
+        - "minister"
+        - "government"
+        - "dail"
+        - "taoiseach"
+        - "transport"
+        - "consumer"
+        - "election"
+        - "vote"
+        - "voting"
+        - "tally"
+        - "count"
+        - "constituency"
+        - "referendum"
+        - "budget"
+        - "tax"
+        - "party"
+        - "fine gael"
+        - "fianna fáil"
+        - "sinn féin"
+        - "labour"
+        - "green party"
+        - "social democrats"
+        - "drugs"
+        - "cocaine"
+        - "murder"
+        - "assault"
+        - "arrested"
+        - "trial"
+        - "sentence"
+        - "flood"
+        - "fire"
+        - "emergency"
+        - "inquiry"
+        - "investigation"
+        - "cost of living"
+        - "inflation"
+        - "wages"
+        - "workers"
+        - "strike"
+        - "protest"
+      local_min: 1
+      sig_min: 1
+
+  - id: china
+    label: "🇨🇳 中国要闻"
+    div_id: "china-news"
+    per_source_cap: 8
+    sources:
+      - {type: page, url: "https://www.bbc.com/news/world/asia/china",        hostname: "bbc.com",    url_pattern: "/news/articles/"}
+      - {type: rss,  url: "https://feeds.bbci.co.uk/news/world/asia/rss.xml", hostname: "bbc.co.uk"}
+      - {type: rss,  url: "https://feeds.bbci.co.uk/news/world/rss.xml",      hostname: "bbc.co.uk"}
+      - {type: page, url: "https://apnews.com/hub/china",                     hostname: "apnews.com", url_pattern: "/article/"}
+    domains:
+      "reuters.com": "Reuters"
+      "apnews.com":  "AP News"
+      "bbc.co.uk":   "BBC"
+      "bbc.com":     "BBC"
+    filter:
+      excl_keywords:
+        - "panda"
+        - "restaurant"
+        - "food"
+        - "recipe"
+        - "travel"
+        - "tourism"
+        - "concert"
+        - "nba"
+        - "sport"
+        - "wildlife"
+      local_keywords:
+        - "china"
+        - "chinese"
+        - "beijing"
+        - "shanghai"
+        - "xi jinping"
+        - "prc"
+        - "cpc"
+        - "huawei"
+        - "alibaba"
+        - "tencent"
+        - "bytedance"
+        - "sino"
+        - "renminbi"
+        - "yuan"
+        - "belt and road"
+        - "taiwan"
+        - "hong kong"
+        - "xinjiang"
+        - "uyghur"
+        - "deepseek"
+        - "li qiang"
+        - "pla"
+        - "pboc"
+        - "mainland china"
+      sig_keywords:
+        - "tariff"
+        - "trade"
+        - "economy"
+        - "economic"
+        - "export"
+        - "manufacturing"
+        - "policy"
+        - "sanction"
+        - "diplomat"
+        - "military"
+        - "ai"
+        - "chip"
+        - "semiconductor"
+        - "tech"
+        - "acquisition"
+        - "market"
+        - "finance"
+        - "hong kong"
+        - "taiwan"
+      local_min: 1
+      sig_min: 1
+      title_bypass_count: 2   # title has 2+ China keywords → skip sig check

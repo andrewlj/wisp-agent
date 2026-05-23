@@ -700,8 +700,8 @@ def _translate_and_summarize(items: list[dict]) -> list[dict]:
         for i, item in enumerate(items):
             entry = data[i] if i < len(data) and isinstance(data[i], dict) else {}
             result.append({
-                "title_cn":   (entry.get("title_cn") or "").strip() or item["title"],
-                "summary_cn": (entry.get("summary_cn") or "").strip() or item.get("description", ""),
+                "title_cn":   str(entry.get("title_cn") or "").strip() or item["title"],
+                "summary_cn": str(entry.get("summary_cn") or "").strip() or item.get("description", ""),
             })
         return result
 

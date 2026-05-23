@@ -531,10 +531,14 @@ def _translate_batch(items: list[dict]) -> list[dict]:
             entry      = data[i] if i < len(data) and isinstance(data[i], dict) else {}
             title_cn   = str(entry.get("title_cn")   or "").strip()
             summary_cn = str(entry.get("summary_cn") or "").strip()
+            # Title: fall back to original English if translation failed or came back English
             if not title_cn or _is_english(title_cn):
                 title_cn = item["title"]
+            # Summary: degenerate or English output → use "" rather than showing English text
             if not summary_cn or re.match(r"^[\d\s.,/%-]+$", summary_cn) or len(summary_cn) < 15:
-                summary_cn = item.get("description", "")
+                summary_cn = ""
+            elif _is_english(summary_cn):
+                summary_cn = ""
             result.append({"title_cn": title_cn, "summary_cn": summary_cn})
 
         while len(result) < n:
@@ -546,12 +550,41 @@ def _translate_batch(items: list[dict]) -> list[dict]:
         return fallback
 
 
+def _retry_single(item: dict) -> dict:
+    """Force-translate one item that the batch call failed on."""
+    prompt = (
+        "将以下英文新闻标题和摘要翻译成简体中文，用2-3句话写中文摘要（80-150字）。\n"
+        "只输出JSON，格式：{\"title_cn\": \"...\", \"summary_cn\": \"...\"}\n\n"
+        f"标题：{item['title']}\n"
+        f"摘要：{(item.get('description') or '（无）')[:300]}"
+    )
+    try:
+        raw  = _call_llm(prompt, max_tokens=300, json_mode=True)
+        data = json.loads(raw)
+        title_cn   = str(data.get("title_cn",   "") or "").strip()
+        summary_cn = str(data.get("summary_cn", "") or "").strip()
+        if not title_cn or _is_english(title_cn):
+            title_cn = item["title"]
+        if not summary_cn or _is_english(summary_cn) or len(summary_cn) < 10:
+            summary_cn = ""
+        return {"title_cn": title_cn, "summary_cn": summary_cn}
+    except Exception as e:
+        print(f"      ✗ retry error: {e}")
+        return {"title_cn": item["title"], "summary_cn": ""}
+
+
 def _translate_and_summarize(items: list[dict]) -> list[dict]:
     if not items:
         return []
     result = []
     for i in range(0, len(items), _TRANSLATE_BATCH):
         result.extend(_translate_batch(items[i: i + _TRANSLATE_BATCH]))
+
+    # Retry pass: fix items still in English or with empty summary
+    for i, (item, tr) in enumerate(zip(items, result)):
+        if _is_english(tr["title_cn"]) or not tr["summary_cn"]:
+            print(f"      ↺ retry: {item['title'][:55]}")
+            result[i] = _retry_single(item)
     return result
 
 

@@ -6,9 +6,12 @@ A lightweight local AI agent that connects to any OpenAI-compatible local LLM se
 
 - **ReAct loop** — LLM thinks, calls tools, observes results, repeats until done
 - **Streaming output** — responses print token by token in real time
-- **Multi-turn conversation** — full session history kept in memory
-- **Colored terminal** — tool calls, results, and final output visually distinct
+- **Session persistence** — save, restore, and browse conversation history
+- **Task checkpoint system** — multi-step task tracking with recovery support
+- **Context compression** — auto-summarises old messages when context grows large
+- **Daily briefing** — generates a translated, summarised HTML news report from global sources
 - **macOS-aware** — system prompt tuned for BSD/macOS command syntax
+- **Workspace sandbox** — all file outputs confined to `~/wisp/workspace`; writes outside are blocked
 
 ## Requirements
 
@@ -24,6 +27,7 @@ A lightweight local AI agent that connects to any OpenAI-compatible local LLM se
 git clone https://github.com/your-username/wisp-agent.git
 cd wisp-agent
 pip install -r requirements.txt
+playwright install chromium
 ```
 
 **2. Configure**
@@ -37,15 +41,21 @@ Edit `config.yaml`:
 ```yaml
 server:
   base_url: "http://127.0.0.1:8000/v1/chat/completions"
-  api_key: "your-api-key"   # set in your mlx-lm server config
+  api_key: "your-api-key"
 
 model:
-  name: "Qwen3.5-9B-MLX-8bit"   # match the model loaded by your server
+  name: "Qwen3.5-9B-MLX-8bit"
   max_tokens: 4096
+  vision: false   # set true for VL models (e.g. Qwen2.5-VL)
 
 agent:
   max_turns: 20
   bash_timeout: 30
+  browser_timeout: 30       # seconds before browser ops time out
+  workspace: "~/wisp/workspace"
+  strict_workspace: true
+  context_limit: 6000       # estimated tokens before compression kicks in
+  context_keep_recent: 6    # recent messages kept verbatim during compression
 ```
 
 **3. Start your local LLM server**
@@ -57,22 +67,29 @@ mlx_lm.server --model <your-model-path> --port 8000
 **4. Run**
 
 ```bash
-# Interactive mode (multi-turn)
+# Interactive mode (multi-turn REPL)
 python agent.py
 
 # One-shot mode
 python agent.py "帮我统计桌面上有多少个文件"
 ```
 
-## Interactive commands
+## REPL commands
 
 | Command | Action |
 |---------|--------|
-| `reset` | Clear conversation history |
-| `exit` / `quit` | Exit the agent |
-| ↑ / ↓ | Browse input history |
+| `/sessions` | List all saved sessions |
+| `/save [name]` | Save the current session |
+| `/load <name\|id>` | Restore a saved session |
+| `/new` | Start a fresh session (auto-saves current) |
+| `/reset` | Clear conversation history |
+| `/tasks` | List saved task checkpoints |
+| `/resume <task-id>` | Resume an interrupted multi-step task |
+| `/debug` | Toggle verbose output (full args, full results, token count) |
+| `/help` | Show all commands |
+| `/exit` | Quit wisp |
 
-## Tools (23 total)
+## Tools (28 total)
 
 | Category | Tools |
 |----------|-------|
@@ -81,31 +98,104 @@ python agent.py "帮我统计桌面上有多少个文件"
 | File ops | `find_files`, `move_file`, `copy_file`, `delete_file` |
 | Network | `http_get`, `http_post` |
 | Browser | `browser_open`, `browser_click`, `browser_type`, `browser_get_text`, `browser_screenshot`, `browser_close` |
+| Task | `task_init`, `task_step_done`, `task_step_fail` |
+| News | `daily_briefing` |
+
+## Data directory
+
+All persistent data lives under `~/wisp/`:
+
+```
+~/wisp/
+├── workspace/          # agent file outputs (reports, screenshots, downloads)
+│   ├── daily-report/   # generated HTML briefings
+│   └── screenshots/
+├── sessions/           # saved conversation histories
+├── tasks/              # multi-step task checkpoints
+└── memory/             # persistent memory (coming soon)
+```
 
 ## Project structure
 
 ```
 wisp-agent/
-├── agent.py              # Main loop, API, REPL
+├── agent.py              # Main loop, REPL, context compression, API
 ├── tools.py              # All tool schemas and implementations
+├── briefing.py           # Daily news briefing generator
+├── session.py            # Session save/load/list
+├── task.py               # Task checkpoint system
 ├── config.yaml           # Your local config (git-ignored)
 ├── config.example.yaml   # Config template
 ├── requirements.txt
 └── LICENSE
 ```
 
+## Daily Briefing
+
+The `daily_briefing` tool fetches, filters, and summarises global news into a single HTML report, opened automatically in your browser.
+
+```
+▶ 生成今日简报
+```
+
+**Sections covered:**
+- 🌍 政治国际 — Reuters, AP, BBC
+- 💡 ICT 前沿研究与技术突破 — Nature, IEEE, MIT Technology Review, DeepMind, HuggingFace, Ars Technica
+- 🏢 高科技企业重大新闻 — The Verge, Wired, Ars Technica, MIT TR
+- 🇮🇪 爱尔兰新闻 — RTÉ, Irish Times, Irish Independent, The Journal
+- 🎬 娱乐 — Variety, Deadline, Hollywood Reporter, Billboard
+- 🇨🇳 中国要闻 — BBC, AP
+
+**How it works:** RSS/page sources → per-source cap + keyword filtering → 1 LLM call per section (translate + summarise, JSON mode) → HTML report saved to `~/wisp/workspace/daily-report/`
+
+---
+
 ## Development Log
 
+### v0.4 — Sessions, Tasks, Briefing & Robustness
+
+**Session persistence**
+- `/save`, `/load`, `/sessions`, `/new` commands to manage conversation history
+- Sessions stored in `~/wisp/sessions/`; auto-saved after every agent loop
+
+**Task checkpoint system**
+- `task_init` / `task_step_done` / `task_step_fail` tools for multi-step task tracking
+- `/tasks` and `/resume <task-id>` REPL commands for recovery after interruptions
+- System prompt instructs the agent to use task tracking for any 3+ step task
+
+**Context compression**
+- Auto-triggers when estimated token count exceeds `context_limit`
+- Summarises the middle portion of the conversation with a single LLM call
+- Keeps the system prompt and the most recent `context_keep_recent` messages verbatim
+
+**Debug toggle**
+- `/debug` REPL command: enables full tool argument printing, untruncated results, and per-turn token count
+
+**Browser timeout control**
+- `browser_timeout` config option; all Playwright operations share a single configurable timeout
+
+**Daily briefing tool**
+- `daily_briefing(sections, open_browser)` — full HTML news report in one agent call
+- LLM called with `response_format=json_object` for reliable structured output
+- `<think>…</think>` stripping for Qwen reasoning models
+- Per-source feed cap ensures all sources get representation (prevents one prolific RSS from dominating)
+- Summary validation rejects degenerate LLM output (pure-numeric strings, too-short text)
+- History-based dedup: articles seen in the past 7 days are skipped
+- Section-level error isolation: one fetch failure never blocks the rest
+
+**Data directory restructure**
+- All wisp data unified under `~/wisp/` (sessions, tasks, workspace, future memory)
+
 ### v0.3 — Security Controls & Stability
-- **Workspace sandbox**: all agent file outputs (write, screenshot, download) are confined to `~/wisp-workspace`; writes and deletes outside are blocked at the tool level
-- **Bash risk scanner**: regex-based detection of destructive commands (`rm -rf`, `sudo rm`, `dd`, `mkfs`, `chmod 777`) and shell redirects (`>`, `>>`, `tee`, `cp`, `mv`) targeting paths outside the workspace
-- **asyncio fix**: lazy-loaded Playwright inside `_get_page()` + `PromptSession(in_thread=True)` to prevent event loop conflicts
-- **`find_files` path fix**: now expands `~` and `$VAR` in directory arguments, and handles glob patterns like `*.png` correctly
-- **Config additions**: `workspace` and `strict_workspace` options in `config.yaml`
+- **Workspace sandbox**: all agent file outputs confined to `~/wisp/workspace`; writes/deletes outside blocked at tool level
+- **Bash risk scanner**: regex detection of destructive commands (`rm -rf`, `sudo rm`, `dd`, `mkfs`, `chmod 777`) and out-of-workspace shell redirects
+- **asyncio fix**: lazy-loaded Playwright + `PromptSession(in_thread=True)`
+- **`find_files` path fix**: handles `~`, `$VAR`, and glob patterns correctly
+- **Config additions**: `workspace`, `strict_workspace`
 
 ### v0.2 — Mac Automation & Tool Expansion
 - Added 14 new tools across 4 categories (mac system, file ops, network, browser)
-- Refactored tool definitions into `tools.py`, keeping `agent.py` focused on the main loop
+- Refactored tool definitions into `tools.py`
 - Browser automation via Playwright (Chromium)
 - File search powered by macOS Spotlight (`mdfind`)
 - Safe file deletion (moves to Trash via Finder)
@@ -113,20 +203,19 @@ wisp-agent/
 ### v0.1 — Core Agent + Interactive Experience
 - ReAct loop with streaming output (SSE)
 - Multi-turn conversation with in-memory history
-- Colored terminal output (ANSI)
+- Colored terminal output (ANSI) + ASCII banner
 - Chinese input fix via `prompt_toolkit`
 - macOS-aware system prompt (BSD command syntax)
-- YAML config file (API key, model, params externalized)
-- Initial tool set: `bash`, `read_file`, `write_file`, `done`
-- Mac tools: `osascript`, `clipboard_read/write`, `screenshot`, `open`
+- YAML config file
+- Initial tools: `bash`, `read_file`, `write_file`, `done`, `osascript`, `clipboard_read/write`, `screenshot`, `open`
+
+---
 
 ## Roadmap
 
-- [ ] Toolset dynamic loading (on-demand, reduce token overhead at scale)
-- [ ] Session persistence (save/restore conversation history)
-- [ ] Context compression for long sessions
-- [ ] Vision support (screenshot analysis with VL models)
-- [ ] Multi-agent support
+- [ ] Persistent memory (`remember` / `recall` across sessions)
+- [ ] Parallel tool execution (concurrent tool calls in a single turn)
+- [ ] macOS system notifications on task completion
 
 ## License
 

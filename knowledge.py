@@ -103,6 +103,41 @@ def append_rule(rule: str, category: str = "general") -> str:
     return f"ok: rule added to [{category}]"
 
 
+def forget(keyword: str) -> str:
+    """Remove all rules whose text contains keyword (case-insensitive).
+
+    Returns:
+        "ok: removed N rule(s) matching '<keyword>'"
+        "ok: no rules matching '<keyword>' found"
+        "error: ..."
+    """
+    if _KNOWLEDGE_PATH is None:
+        return "error: knowledge not initialized"
+    keyword = keyword.strip()
+    if not keyword:
+        return "error: keyword cannot be empty"
+    if not _KNOWLEDGE_PATH.exists():
+        return f"ok: no rules matching '{keyword}' found"
+
+    kw_lower = keyword.lower()
+    lines    = _KNOWLEDGE_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept     = []
+    removed  = 0
+    for line in lines:
+        if line.startswith("- ") and kw_lower in line.lower():
+            removed += 1
+        else:
+            kept.append(line)
+
+    if removed == 0:
+        return f"ok: no rules matching '{keyword}' found"
+
+    # Collapse triple+ blank lines left by removals
+    content = re.sub(r"\n{3,}", "\n\n", "".join(kept))
+    _KNOWLEDGE_PATH.write_text(content, encoding="utf-8")
+    return f"ok: removed {removed} rule{'s' if removed > 1 else ''} matching '{keyword}'"
+
+
 def _is_similar(new_rule: str) -> bool:
     """Return True if an existing rule overlaps >= 75% word-wise."""
     if _KNOWLEDGE_PATH is None or not _KNOWLEDGE_PATH.exists():

@@ -941,11 +941,20 @@ def interactive() -> None:
                         print(c(C.CYAN, context))
 
             elif cmd == "knowledge":
-                kb = _knowledge.load()
-                if kb:
-                    print(c(C.GRAY, kb))
+                if arg.startswith("forget ") or arg == "forget":
+                    kw = arg[len("forget"):].strip()
+                    if not kw:
+                        print(c(C.RED, "  usage: /knowledge forget <keyword>"))
+                    else:
+                        result = _knowledge.forget(kw)
+                        color  = C.GREEN if result.startswith("ok:") else C.RED
+                        print(c(color, f"  {result}"))
                 else:
-                    print(c(C.GRAY, "  knowledge base is empty"))
+                    kb = _knowledge.load()
+                    if kb:
+                        print(c(C.GRAY, kb))
+                    else:
+                        print(c(C.GRAY, "  knowledge base is empty"))
 
             elif cmd == "debug":
                 global _DEBUG
@@ -966,7 +975,8 @@ def interactive() -> None:
                     "  /reset             clear current history\n"
                     "  /tasks             list saved tasks\n"
                     "  /resume <task-id>  resume an interrupted task\n"
-                    "  /knowledge         show learned tool usage rules\n"
+                    "  /knowledge                    show learned tool usage rules\n"
+                    "  /knowledge forget <keyword>   remove rules containing keyword\n"
                     "  /debug             toggle verbose debug output\n"
                     "  /exit              quit wisp"
                 ))

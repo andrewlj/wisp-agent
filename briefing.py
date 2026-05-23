@@ -80,15 +80,25 @@ _POL_DOMAINS = {
     "ft.com":       "Financial Times",   "wsj.com":     "Wall Street Journal",
 }
 _ICT_DOMAINS = {
-    "theverge.com":          "The Verge",
-    "arstechnica.com":       "Ars Technica",
     "technologyreview.com":  "MIT Technology Review",
     "nature.com":            "Nature",
     "spectrum.ieee.org":     "IEEE Spectrum",
     "ieee.org":              "IEEE",
     "sciencedaily.com":      "Science Daily",
     "newscientist.com":      "New Scientist",
+    "huggingface.co":        "HuggingFace",
+    "deepmind.google":       "DeepMind",
+    "deepmind.com":          "DeepMind",
+    # kept for ict_business cross-filtering
+    "theverge.com":          "The Verge",
+    "arstechnica.com":       "Ars Technica",
     "wired.com":             "Wired",
+}
+
+# Sources trusted to publish genuine research — pass filter without keyword check
+_ICT_R_TRUSTED = {
+    "MIT Technology Review", "Nature", "IEEE Spectrum", "IEEE",
+    "Science Daily", "HuggingFace", "DeepMind", "New Scientist",
 }
 _IRE_DOMAINS = {
     "rte.ie":          "RTÉ",
@@ -132,16 +142,26 @@ _CHINA_EXCL = {"panda", "restaurant", "food", "recipe", "travel", "tourism",
 _ICT_R_KW = {
     "ai", "llm", "model", "agent", "gpu", "chip", "semiconductor", "quantum",
     "robot", "robotics", "breakthrough", "research", "study", "scientists",
-    "cloud", "inference", "training", "benchmark", "fusion", "battery",
-    "security", "cyber", "paper", "dataset", "open source",
+    "inference", "training", "benchmark", "fusion", "battery",
+    "paper", "dataset", "open source", "open-source", "weights",
+    "architecture", "algorithm", "neural", "transformer", "diffusion",
+    "multimodal", "vision", "language model",
 }
-_ICT_R_STRONG = {
+# Must appear in title for non-trusted sources
+_ICT_R_TITLE_REQUIRED = {
     "breakthrough", "research", "study", "scientists", "paper", "quantum",
-    "robotics", "benchmark", "dataset", "inference", "training", "model",
-    "llm", "agent", "semiconductor", "fusion",
+    "robotics", "benchmark", "dataset", "inference", "training",
+    "llm", "model", "open-source", "open source", "weights", "algorithm",
+    "neural", "transformer", "diffusion", "multimodal", "release",
 }
-_ICT_R_EXCL = {"promo code", "coupon", "gift guide", "shopping", "deals",
-               "review", "hands-on", "preorder", "sale", "discount"}
+# Business signals that disqualify a research article
+_ICT_R_BIZ_EXCL = {
+    "funding", "ipo", "acquisition", "merger", "earnings", "revenue",
+    "lawsuit", "antitrust", "layoff", "stock", "valuation", "quarterly",
+    "partnership", "deal", "advertising", "marketing", "enterprise sales",
+    "promo code", "coupon", "gift guide", "shopping", "deals",
+    "review", "hands-on", "preorder", "sale", "discount",
+}
 
 _ICT_B_KW = {
     "openai", "microsoft", "google", "meta", "amazon", "anthropic", "nvidia",
@@ -187,10 +207,12 @@ _SOURCES: dict[str, list[dict]] = {
         {"type": "page", "url": "https://apnews.com/politics",                       "hostname": "apnews.com", "url_pattern": "/article/"},
     ],
     "ict_research": [
-        {"type": "rss", "url": "https://www.theverge.com/rss/index.xml",             "hostname": "theverge.com"},
-        {"type": "rss", "url": "https://feeds.arstechnica.com/arstechnica/index",    "hostname": "arstechnica.com"},
+        {"type": "rss", "url": "https://huggingface.co/blog/feed.xml",               "hostname": "huggingface.co"},
+        {"type": "rss", "url": "https://deepmind.google/blog/rss.xml",               "hostname": "deepmind.google"},
+        {"type": "rss", "url": "https://spectrum.ieee.org/feeds/feed.rss",           "hostname": "spectrum.ieee.org"},
         {"type": "rss", "url": "https://www.technologyreview.com/topnews.rss",       "hostname": "technologyreview.com"},
         {"type": "rss", "url": "https://www.nature.com/nature/news.rss",             "hostname": "nature.com"},
+        {"type": "rss", "url": "https://feeds.arstechnica.com/arstechnica/index",    "hostname": "arstechnica.com"},
     ],
     "ict_business": [
         {"type": "rss", "url": "https://www.theverge.com/rss/index.xml",             "hostname": "theverge.com"},
@@ -309,15 +331,14 @@ def _item_text(item: dict) -> str:
 def _keep_ict_research(item: dict) -> bool:
     text  = _item_text(item)
     title = item.get("title", "").lower()
-    if _has_any(text, _ICT_R_EXCL):
+    # Reject anything with business/commercial signals
+    if _has_any(text, _ICT_R_BIZ_EXCL):
         return False
-    preferred = {"Nature", "MIT Technology Review", "Ars Technica",
-                 "IEEE Spectrum", "Science Daily", "New Scientist"}
-    if item.get("source") in preferred and _count(text, _ICT_R_KW) >= 1:
-        return True
-    return _count(text, _ICT_R_STRONG) >= 1 and (
-        _count(text, _ICT_R_KW) >= 2 or _has_any(title, _ICT_R_STRONG)
-    )
+    # Trusted research outlets: pass if any research keyword present
+    if item.get("source") in _ICT_R_TRUSTED:
+        return _count(text, _ICT_R_KW) >= 1
+    # General tech outlets: require research signal in the title specifically
+    return _has_any(title, _ICT_R_TITLE_REQUIRED) and _count(text, _ICT_R_KW) >= 2
 
 
 def _keep_ict_business(item: dict) -> bool:

@@ -7,6 +7,7 @@ Dependencies: requests, pyyaml, prompt_toolkit, playwright
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -367,7 +368,12 @@ def print_banner() -> None:
 
 # ── Streaming API ─────────────────────────────────────────────────────────────
 
-def call_api_stream(messages: list) -> tuple[str, list[dict]]:
+def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
+    """Stream one LLM turn.  Returns (content, tool_calls, usage).
+
+    usage = {"prompt_tokens": N, "completion_tokens": M} when the server
+    reports it; empty dict when not available.
+    """
     resp = requests.post(
         BASE_URL,
         headers={"Authorization": f"Bearer {API_KEY}"},
@@ -386,6 +392,7 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
 
     full_content = ""
     acc: dict[int, dict] = {}
+    usage: dict = {}
 
     for raw in resp.iter_lines():
         if not raw or not raw.startswith(b"data: "):
@@ -393,8 +400,16 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
         data = raw[6:]
         if data == b"[DONE]":
             break
-        chunk  = json.loads(data)
-        choice = chunk["choices"][0]
+        chunk = json.loads(data)
+
+        # Capture token usage from any chunk that carries it
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+        choice = choices[0]
         delta  = choice.get("delta", {})
 
         if delta.get("content"):
@@ -414,7 +429,7 @@ def call_api_stream(messages: list) -> tuple[str, list[dict]]:
     if full_content:
         print()
 
-    return full_content, [acc[i] for i in sorted(acc)]
+    return full_content, [acc[i] for i in sorted(acc)], usage
 
 # ── Output helpers ────────────────────────────────────────────────────────────
 
@@ -455,7 +470,7 @@ def _print_tool_call(name: str, args: dict) -> None:
         print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}  {C.DIM}{_rgb(140,140,140)}{args_str}{C.RESET}")
 
 
-def _print_tool_result(result: str) -> None:
+def _print_tool_result(result: str, elapsed: float | None = None) -> None:
     r = result.strip()
     # Color by result type
     if r.startswith("security:") or r.startswith("error:"):
@@ -468,11 +483,25 @@ def _print_tool_result(result: str) -> None:
         color = _rgb(210, 170, 50)
     else:
         color = _rgb(130, 130, 130)
+    # A — timing suffix (debug only)
+    timing = (f"  {C.DIM}{_rgb(100,100,100)}[{elapsed:.2f}s]{C.RESET}"
+              if _DEBUG and elapsed is not None else "")
     if _DEBUG:
-        print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{r}{C.RESET}")
+        print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{r}{C.RESET}{timing}")
     else:
         preview = r[:300] + ("..." if len(r) > 300 else "")
         print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{preview}{C.RESET}")
+
+
+def _print_debug_usage(usage: dict, llm_s: float) -> None:
+    """C — print real token counts + LLM latency after streaming completes."""
+    if not _DEBUG:
+        return
+    pt = usage.get("prompt_tokens",     usage.get("input_tokens",  "?"))
+    ct = usage.get("completion_tokens", usage.get("output_tokens", "?"))
+    print(f"  {C.DIM}{_rgb(120,90,200)}"
+          f"prompt {pt} · completion {ct} · llm {llm_s:.1f}s"
+          f"{C.RESET}")
 
 def _print_done(result_text: str) -> None:
     bar   = f"{_rgb(0,170,100)}{'─' * _TURN_WIDTH}{C.RESET}"
@@ -484,8 +513,19 @@ def _print_done(result_text: str) -> None:
 
 # ── Agent Turn ────────────────────────────────────────────────────────────────
 
-def run_turn(messages: list, turn: int = 0, max_turns: int = 0) -> bool:
-    content, tool_calls = call_api_stream(messages)
+def run_turn(messages: list, turn: int = 0, max_turns: int = 0,
+             tool_log: list | None = None) -> bool:
+    """Run one agent turn.
+
+    tool_log — if provided, each tool execution appends (name, elapsed_s).
+    """
+    t_llm = time.time()
+    content, tool_calls, usage = call_api_stream(messages)
+    llm_s = time.time() - t_llm
+
+    # C — real token counts + LLM latency
+    if usage:
+        _print_debug_usage(usage, llm_s)
 
     assistant_msg: dict = {"role": "assistant", "content": content}
     if tool_calls:
@@ -509,10 +549,16 @@ def run_turn(messages: list, turn: int = 0, max_turns: int = 0) -> bool:
             _print_done(args.get("result", ""))
             return True
 
+        # A — time each tool dispatch
+        t0     = time.time()
         result = dispatch(name, args, vision=VISION)
+        elapsed = time.time() - t0
+
+        if tool_log is not None:
+            tool_log.append((name, elapsed))
 
         if isinstance(result, dict) and "image_b64" in result:
-            _print_tool_result(result["text"] + " [image attached]")
+            _print_tool_result(result["text"] + " [image attached]", elapsed)
             tool_content = [
                 {"type": "text", "text": result["text"]},
                 {"type": "image_url", "image_url": {
@@ -520,7 +566,7 @@ def run_turn(messages: list, turn: int = 0, max_turns: int = 0) -> bool:
                 }},
             ]
         else:
-            _print_tool_result(str(result))
+            _print_tool_result(str(result), elapsed)
             tool_content = result
 
         messages.append({
@@ -724,18 +770,47 @@ def _post_task_reflect(messages: list) -> None:
 
 # ── Agent Loop ────────────────────────────────────────────────────────────────
 
+def _print_task_summary(tool_log: list[tuple[str, float]], total_s: float, turns: int) -> None:
+    """D — debug-only task summary after done."""
+    if not _DEBUG or not tool_log:
+        return
+    counts: dict[str, int] = {}
+    for name, _ in tool_log:
+        counts[name] = counts.get(name, 0) + 1
+    tool_str = " · ".join(f"{n}×{c}" for n, c in counts.items())
+    label = (f" {turns} turn{'s' if turns > 1 else ''}"
+             f" · {total_s:.1f}s · {tool_str} ")
+    bar_total = _TURN_WIDTH - len(label) - 2
+    left_b    = 4
+    right_b   = max(0, bar_total - left_b)
+    line = (f"{_rgb(0,80,95)}{'─'*left_b}{C.RESET}"
+            f"{C.DIM}{_rgb(120,90,200)}{label}{C.RESET}"
+            f"{_rgb(0,80,95)}{'─'*right_b}{C.RESET}")
+    print(f"  {line}")
+
+
 def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
     messages.append({"role": "user", "content": user_input})
     _maybe_compress(messages)
+
+    tool_log: list[tuple[str, float]] = []
+    t_start  = time.time()
+    turns_used = 0
+
     for turn in range(1, MAX_TURNS + 1):
+        turns_used = turn
         _print_turn_header(turn, MAX_TURNS, messages)
-        if run_turn(messages, turn, MAX_TURNS):
+        if run_turn(messages, turn, MAX_TURNS, tool_log=tool_log):
             break
     else:
         bar = f"{_rgb(200,80,80)}{'─' * _TURN_WIDTH}{C.RESET}"
         print(f"\n  {bar}")
         print(f"  {_rgb(200,80,80)}✗  stopped: {MAX_TURNS}-turn limit reached{C.RESET}")
         print(f"  {bar}")
+
+    # D — task summary (debug only)
+    _print_task_summary(tool_log, time.time() - t_start, turns_used)
+
     # Post-task reflection: learn from failures and corrections
     _post_task_reflect(messages)
     # Auto-save session after every agent loop
@@ -877,7 +952,9 @@ def interactive() -> None:
                 _DEBUG = not _DEBUG
                 state = f"{_rgb(0,210,210)}on{C.RESET}" if _DEBUG else f"{_rgb(130,130,130)}off{C.RESET}"
                 print(f"  debug mode {state}"
-                      + (f"  {C.DIM}{_rgb(120,90,200)}(full args · full results · token count per turn){C.RESET}"
+                      + (f"  {C.DIM}{_rgb(120,90,200)}"
+                         f"(full args · full results · real tokens · tool timing · task summary)"
+                         f"{C.RESET}"
                          if _DEBUG else ""))
 
             elif cmd == "help":

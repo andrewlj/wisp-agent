@@ -76,7 +76,12 @@ def _load_profile() -> dict:
 
 def _build_system_prompt(profile: dict) -> str:
     """Assemble system prompt: soul + profile + static environment rules."""
-    parts = []
+    from datetime import datetime
+    _weekdays = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+    _now      = datetime.now()
+    _date_str = _now.strftime(f"%Y-%m-%d %H:%M ({_weekdays[_now.weekday()]})")
+
+    parts = [f"Current date and time: {_date_str}"]
 
     # 1. Soul — core identity and constraints
     soul = _load_soul()
@@ -109,11 +114,8 @@ def _build_system_prompt(profile: dict) -> str:
         parts.append(kb)
 
     # 4. Static environment rules
-    from datetime import datetime
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
     parts.append(f"""\
 ## 运行环境
-Current date and time: {now}
 You are running on macOS (Apple Silicon). Shell: zsh. Python: python3.11. Package manager: Homebrew.
 Always use macOS/BSD command syntax — NOT Linux/GNU:
 - Memory : `vm_stat`, `sysctl hw.memsize`

@@ -61,6 +61,7 @@ _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
 
 _SOUL_PATH    = Path(__file__).parent / "soul.md"
 _PROFILE_PATH = Path(__file__).parent / "profile.yaml"
+_profile: dict = {}   # module-level; set at startup, used by run_agent
 
 def _load_soul() -> str:
     if _SOUL_PATH.exists():
@@ -108,8 +109,11 @@ def _build_system_prompt(profile: dict) -> str:
         parts.append(kb)
 
     # 4. Static environment rules
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
     parts.append(f"""\
 ## 运行环境
+Current date and time: {now}
 You are running on macOS (Apple Silicon). Shell: zsh. Python: python3.11. Package manager: Homebrew.
 Always use macOS/BSD command syntax — NOT Linux/GNU:
 - Memory : `vm_stat`, `sysctl hw.memsize`
@@ -867,6 +871,8 @@ def _print_task_summary(tool_log: list[tuple[str, float]], total_s: float, turns
 
 
 def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
+    # Refresh system prompt so current date/time is always accurate
+    messages[0] = {"role": "system", "content": _build_system_prompt(_profile)}
     messages.append({"role": "user", "content": user_input})
     _maybe_compress(messages)
 
@@ -918,6 +924,7 @@ def _print_tasks() -> None:
 # ── Interactive REPL ──────────────────────────────────────────────────────────
 
 def interactive() -> None:
+    global _profile
     # Onboarding: first launch if no profile exists
     if not _PROFILE_PATH.exists():
         print_banner()
@@ -1070,6 +1077,7 @@ def interactive() -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         oneshot_task = " ".join(sys.argv[1:]).strip()
+        global _profile
         _profile  = _load_profile()
         messages  = [{"role": "system", "content": _build_system_prompt(_profile)}]
         run_agent(oneshot_task, messages)

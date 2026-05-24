@@ -133,6 +133,7 @@ Always use macOS/BSD command syntax — NOT Linux/GNU:
 - Use `osascript` for notifications, app control, dialogs.
 - Use `browser_*` for interactive web tasks (flights, forms, logins) — not `http_get`.
 - Call `done` as soon as the task is fully complete.
+- When the task involves dates or times (today, tomorrow, next week, etc.), ALWAYS run `bash date '+%Y-%m-%d %H:%M %A'` first to get the current time before calculating any date.
 
 ## Task tracking
 - For any task with 3 or more steps, ALWAYS call `task_init` first.

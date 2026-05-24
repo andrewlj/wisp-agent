@@ -372,7 +372,7 @@ TESTS: list[UnitTest] = [
         id="u7.2", module="tool_find_files",
         name="搜索不存在的文件返回 no files found",
         fn=lambda: _assert_contains(
-            tool_find_files("wisp-nonexistent-zzzzzz.txt"), "no files found"),
+            tool_find_files("*.wisp-nonexistent-xq9z7m2p"), "no files found"),
     ),
 
     # ── _parse_dt ─────────────────────────────────────────────────────────────

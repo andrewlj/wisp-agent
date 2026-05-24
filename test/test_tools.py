@@ -45,12 +45,17 @@ from tools import (
     init_workspace,
     _bash_risk,
     _guard_path,
+    _parse_dt,
     tool_bash,
     tool_read_file,
     tool_write_file,
     tool_find_files,
     tool_clipboard_read,
     tool_clipboard_write,
+    tool_reminders_list,
+    tool_reminders_add,
+    tool_calendar_list,
+    tool_calendar_add,
 )
 
 init_workspace(str(WORKSPACE), strict=True)
@@ -368,6 +373,118 @@ TESTS: list[UnitTest] = [
         name="搜索不存在的文件返回 no files found",
         fn=lambda: _assert_contains(
             tool_find_files("wisp-nonexistent-zzzzzz.txt"), "no files found"),
+    ),
+
+    # ── _parse_dt ─────────────────────────────────────────────────────────────
+
+    UnitTest(
+        id="u8.1", module="parse_dt",
+        name="解析 YYYY-MM-DD HH:MM",
+        fn=lambda: (
+            None if _parse_dt("2026-05-25 14:30") is not None
+            and _parse_dt("2026-05-25 14:30").hour == 14
+            and _parse_dt("2026-05-25 14:30").minute == 30
+            else "failed to parse 2026-05-25 14:30"
+        ),
+    ),
+    UnitTest(
+        id="u8.2", module="parse_dt",
+        name="解析 YYYY-MM-DD（无时间）",
+        fn=lambda: (
+            None if _parse_dt("2026-05-25") is not None
+            and _parse_dt("2026-05-25").hour == 0
+            else "failed to parse 2026-05-25"
+        ),
+    ),
+    UnitTest(
+        id="u8.3", module="parse_dt",
+        name="非法日期返回 None",
+        fn=lambda: (
+            None if _parse_dt("not-a-date") is None
+            else "expected None for invalid date"
+        ),
+    ),
+
+    # ── tool_reminders ────────────────────────────────────────────────────────
+
+    UnitTest(
+        id="u9.1", module="tool_reminders",
+        name="reminders_list — 读取不报错",
+        fn=lambda: _assert_not_contains(tool_reminders_list(), "error:"),
+    ),
+    UnitTest(
+        id="u9.2", module="tool_reminders",
+        name="reminders_add — 添加提醒成功",
+        fn=lambda: _assert_contains(
+            tool_reminders_add("wisp-unit-test-reminder", due="2099-12-31 09:00",
+                               list_name="Reminders"),
+            "ok:"),
+        teardown=lambda: _run(["osascript", "-e",
+            'tell application "Reminders" to tell list "Reminders" to '
+            'delete (every reminder whose name is "wisp-unit-test-reminder")']),
+    ),
+    UnitTest(
+        id="u9.3", module="tool_reminders",
+        name="reminders_add — 非法日期返回 error",
+        fn=lambda: _assert_contains(
+            tool_reminders_add("bad-date-test", due="not-a-date"),
+            "error:"),
+    ),
+    UnitTest(
+        id="u9.4", module="tool_reminders",
+        name="reminders_list — 指定不存在的清单返回 error",
+        fn=lambda: _assert_contains(
+            tool_reminders_list(list_name="wisp-nonexistent-list-zzzz"),
+            "error:"),
+    ),
+
+    # ── tool_calendar ─────────────────────────────────────────────────────────
+
+    UnitTest(
+        id="u10.1", module="tool_calendar",
+        name="calendar_list — 读取不报错",
+        fn=lambda: _assert_not_contains(tool_calendar_list(), "error:"),
+    ),
+    UnitTest(
+        id="u10.2", module="tool_calendar",
+        name="calendar_add — 添加事件成功",
+        fn=lambda: _assert_contains(
+            tool_calendar_add("wisp-unit-test-event", start="2099-12-31 10:00"),
+            "ok:"),
+        teardown=lambda: _run(["osascript", "-e",
+            'tell application "Calendar" to repeat with cal in every calendar\n'
+            '    try\n'
+            '        delete (every event of cal whose summary is "wisp-unit-test-event")\n'
+            '    end try\n'
+            'end repeat']),
+    ),
+    UnitTest(
+        id="u10.3", module="tool_calendar",
+        name="calendar_add — 非法日期返回 error",
+        fn=lambda: _assert_contains(
+            tool_calendar_add("bad-start", start="not-a-date"),
+            "error:"),
+    ),
+    UnitTest(
+        id="u10.4", module="tool_calendar",
+        name="calendar_add — end 自动补全为 start+1h",
+        fn=lambda: (
+            lambda r: None if "ok:" in r and "11:00" in r
+            else f"expected 11:00 in result, got: {r}"
+        )(tool_calendar_add("wisp-unit-test-duration", start="2099-12-31 10:00")),
+        teardown=lambda: _run(["osascript", "-e",
+            'tell application "Calendar" to repeat with cal in every calendar\n'
+            '    try\n'
+            '        delete (every event of cal whose summary is "wisp-unit-test-duration")\n'
+            '    end try\n'
+            'end repeat']),
+    ),
+    UnitTest(
+        id="u10.5", module="tool_calendar",
+        name="calendar_list — 指定不存在的日历返回 error",
+        fn=lambda: _assert_contains(
+            tool_calendar_list(calendar_name="wisp-nonexistent-cal-zzzz"),
+            "error:"),
     ),
 ]
 

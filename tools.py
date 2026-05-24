@@ -288,6 +288,41 @@ SCHEMAS: list[dict] = [
     _fn("browser_close", "Close the Playwright browser.",
         {}, []),
 
+    # ── Reminders ─────────────────────────────────────────────────────────────
+    _fn("reminders_list",
+        "List incomplete reminders from macOS Reminders app.",
+        {
+            "list_name": {"type": "string", "description": "Optional: name of the Reminders list. Omit to read the default list. Pass \"*\" to read all lists."},
+            "limit":     {"type": "integer", "description": "Max reminders to return. Default 20."},
+        }, []),
+
+    _fn("reminders_add",
+        "Add a new reminder to macOS Reminders app.",
+        {
+            "title":     {"type": "string", "description": "Reminder title"},
+            "due":       {"type": "string", "description": "Optional due date/time: 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
+            "notes":     {"type": "string", "description": "Optional notes/body text"},
+            "list_name": {"type": "string", "description": "Target list name. Default: 'Reminders'"},
+        }, ["title"]),
+
+    # ── Calendar ──────────────────────────────────────────────────────────────
+    _fn("calendar_list",
+        "List upcoming events from macOS Calendar app.",
+        {
+            "days":     {"type": "integer", "description": "How many days ahead to look. Default 7."},
+            "calendar": {"type": "string",  "description": "Optional: name of a specific calendar."},
+        }, []),
+
+    _fn("calendar_add",
+        "Add a new event to macOS Calendar app.",
+        {
+            "title":    {"type": "string", "description": "Event title"},
+            "start":    {"type": "string", "description": "Start date/time: 'YYYY-MM-DD HH:MM'"},
+            "end":      {"type": "string", "description": "Optional end date/time. Default: start + 1 hour."},
+            "calendar": {"type": "string", "description": "Optional: target calendar name. Default: first writable calendar."},
+            "notes":    {"type": "string", "description": "Optional event notes."},
+        }, ["title", "start"]),
+
     # ── Daily briefing ────────────────────────────────────────────────────────
     _fn("daily_briefing",
         "Generate today's global news briefing as an HTML report. "
@@ -639,6 +674,260 @@ def tool_browser_close() -> str:
         return f"error: {e}"
 
 
+# ── Reminders & Calendar helpers ─────────────────────────────────────────────
+
+def _osascript_clean(script: str, timeout: int = 15) -> str:
+    """Run AppleScript; return stdout only (strips [exit N] suffix)."""
+    result = _run(["osascript", "-e", script], timeout=timeout)
+    if "[exit 0]" in result:
+        return result.split("[exit 0]")[0].strip()
+    return result  # error case: caller sees the raw error
+
+
+def _parse_dt(s: str):
+    """Parse 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD'. Returns datetime or None."""
+    from datetime import datetime
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s.strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _as_date_script(var: str, dt) -> str:
+    """Return AppleScript lines that set `var` to the given datetime.
+    Uses component assignment — locale-independent."""
+    secs = dt.hour * 3600 + dt.minute * 60
+    return (
+        f"set {var} to current date\n"
+        f"set year of {var} to {dt.year}\n"
+        f"set month of {var} to {dt.month}\n"
+        f"set day of {var} to {dt.day}\n"
+        f"set time of {var} to {secs}\n"
+    )
+
+
+# ── Reminders ─────────────────────────────────────────────────────────────────
+
+def tool_reminders_list(list_name: str = "", limit: int = 20) -> str:
+    # "*" means all lists; empty string means first/default list (faster, avoids iCloud timeout)
+    if list_name == "*":
+        list_clause = "every list"
+        guard = ""
+    elif list_name:
+        list_clause = f'{{list "{list_name}"}}'
+        guard = (
+            f'if not (exists list "{list_name}") then\n'
+            f'    return "error: list \\"{list_name}\\" not found"\n'
+            f'end if\n'
+        )
+    else:
+        list_clause = "{first list}"
+        guard = ""
+
+    # Batch-fetch properties (name / completed / due date) per list — much faster
+    # than accessing reminder objects one by one. Scan at most 5 lists.
+    script = f"""
+tell application "Reminders"
+    {guard}
+    set theLists to {list_clause}
+    set output to ""
+    set counter to 0
+    set listNum to 0
+    repeat with theList in theLists
+        set listNum to listNum + 1
+        if listNum > 5 then exit repeat
+        set listLabel to name of theList
+        set rNames to name of every reminder of theList
+        set rDones to completed of every reminder of theList
+        set rDues  to due date of every reminder of theList
+        repeat with i from 1 to count of rNames
+            if counter >= {limit} then exit repeat
+            if item i of rDones is false then
+                set itemLine to listLabel & " | " & item i of rNames
+                try
+                    set dd to item i of rDues
+                    if dd is not missing value then
+                        set y to year of dd as string
+                        set mo to (month of dd as integer)
+                        if mo < 10 then set mo to "0" & mo
+                        set dy to day of dd
+                        if dy < 10 then set dy to "0" & dy
+                        set t to time of dd
+                        set h to t div 3600
+                        set mi to (t mod 3600) div 60
+                        if h < 10 then set h to "0" & h
+                        if mi < 10 then set mi to "0" & mi
+                        set itemLine to itemLine & " | due: " & y & "-" & mo & "-" & dy & " " & h & ":" & mi
+                    end if
+                end try
+                set output to output & itemLine & "\\n"
+                set counter to counter + 1
+            end if
+        end repeat
+    end repeat
+    if output is "" then return "no pending reminders"
+    return output
+end tell
+"""
+    return _osascript_clean(script, timeout=60)
+
+
+def tool_reminders_add(title: str, due: str = "", notes: str = "",
+                       list_name: str = "Reminders") -> str:
+    date_lines = ""
+    set_due    = ""
+    if due:
+        dt = _parse_dt(due)
+        if dt is None:
+            return f"error: cannot parse due date '{due}' — use YYYY-MM-DD or YYYY-MM-DD HH:MM"
+        date_lines = _as_date_script("dueDate", dt)
+        set_due    = "set due date of newReminder to dueDate"
+
+    notes_escaped = notes.replace('"', '\\"')
+    title_escaped = title.replace('"', '\\"')
+    notes_prop    = f', body:"{notes_escaped}"' if notes else ""
+
+    script = f"""
+tell application "Reminders"
+    if not (exists list "{list_name}") then
+        make new list with properties {{name:"{list_name}"}}
+    end if
+    tell list "{list_name}"
+        set newReminder to make new reminder with properties {{name:"{title_escaped}"{notes_prop}}}
+        {date_lines}
+        {set_due}
+    end tell
+end tell
+return "ok"
+"""
+    result = _osascript_clean(script, timeout=60)
+    if result == "ok" or "[exit 0]" in result:
+        due_hint = f" (due {due})" if due else ""
+        return f"ok: added reminder '{title}'{due_hint} to '{list_name}'"
+    return result
+
+
+# ── Calendar ──────────────────────────────────────────────────────────────────
+
+def tool_calendar_list(days: int = 7, calendar_name: str = "") -> str:
+    if calendar_name:
+        cal_clause = f'{{calendar "{calendar_name}"}}'
+        guard = (
+            f'if not (exists calendar "{calendar_name}") then\n'
+            f'    return "error: calendar \\"{calendar_name}\\" not found"\n'
+            f'end if\n'
+        )
+    else:
+        cal_clause = "every calendar"
+        guard = ""
+
+    script = f"""
+tell application "Calendar"
+    {guard}
+    set startDate to current date
+    set time of startDate to 0
+    set endDate to startDate + ({days} * days)
+    set theCals to {cal_clause}
+    set output to ""
+    set counter to 0
+    repeat with cal in theCals
+        try
+            set theEvents to (every event of cal whose start date >= startDate and start date < endDate)
+            repeat with e in theEvents
+                if counter < 50 then
+                    set sd to start date of e
+                    set y to year of sd as string
+                    set mo to (month of sd as integer)
+                    if mo < 10 then set mo to "0" & mo
+                    set dy to day of sd
+                    if dy < 10 then set dy to "0" & dy
+                    set t to time of sd
+                    set h to t div 3600
+                    set mi to (t mod 3600) div 60
+                    if h < 10 then set h to "0" & h
+                    if mi < 10 then set mi to "0" & mi
+                    set dateStr to y & "-" & mo & "-" & dy & " " & h & ":" & mi
+                    set output to output & dateStr & "\\t" & (name of cal) & "\\t" & (summary of e) & "\\n"
+                    set counter to counter + 1
+                end if
+            end repeat
+        end try
+    end repeat
+    if output is "" then return "no upcoming events in the next {days} days"
+    return output
+end tell
+"""
+    raw = _osascript_clean(script, timeout=60)
+    if raw.startswith("error:") or raw.startswith("no upcoming"):
+        return raw
+
+    # Sort by date and format for display
+    lines = [l for l in raw.splitlines() if l.strip()]
+    try:
+        lines.sort(key=lambda l: l.split("\t")[0])
+    except Exception:
+        pass
+    result_lines = []
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) == 3:
+            result_lines.append(f"{parts[0]}  {parts[1]}  {parts[2]}")
+        else:
+            result_lines.append(line)
+    return "\n".join(result_lines)
+
+
+def tool_calendar_add(title: str, start: str, end: str = "",
+                      calendar_name: str = "", notes: str = "") -> str:
+    start_dt = _parse_dt(start)
+    if start_dt is None:
+        return f"error: cannot parse start '{start}' — use YYYY-MM-DD HH:MM"
+
+    from datetime import timedelta
+    if end:
+        end_dt = _parse_dt(end)
+        if end_dt is None:
+            return f"error: cannot parse end '{end}' — use YYYY-MM-DD HH:MM"
+    else:
+        end_dt = start_dt + timedelta(hours=1)
+
+    start_lines = _as_date_script("startDate", start_dt)
+    end_lines   = _as_date_script("endDate",   end_dt)
+
+    if calendar_name:
+        cal_clause = f'calendar "{calendar_name}"'
+        guard = (
+            f'if not (exists calendar "{calendar_name}") then\n'
+            f'    return "error: calendar \\"{calendar_name}\\" not found"\n'
+            f'end if\n'
+        )
+    else:
+        cal_clause = "first calendar whose writable is true"
+        guard = ""
+
+    title_escaped = title.replace('"', '\\"')
+    notes_prop    = f', description:"{notes.replace(chr(34), chr(92)+chr(34))}"' if notes else ""
+
+    script = f"""
+tell application "Calendar"
+    {guard}
+    {start_lines}
+    {end_lines}
+    tell {cal_clause}
+        make new event with properties {{summary:"{title_escaped}", start date:startDate, end date:endDate{notes_prop}}}
+    end tell
+end tell
+return "ok"
+"""
+    result = _osascript_clean(script, timeout=15)
+    if result == "ok":
+        end_hint = f" → {end}" if end else f" → {end_dt.strftime('%Y-%m-%d %H:%M')}"
+        return f"ok: added event '{title}' on {start}{end_hint}"
+    return result
+
+
 # ── Daily briefing ───────────────────────────────────────────────────────────
 
 def tool_daily_briefing(open_browser: bool = True,
@@ -720,4 +1009,10 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "task_step_done":   return tool_task_step_done(args["task_id"], args["step_id"], args.get("note", ""))
         case "task_step_fail":   return tool_task_step_fail(args["task_id"], args["step_id"], args.get("reason", ""))
         case "learn":            return tool_learn(args["rule"], args.get("category", "general"))
+        # Reminders
+        case "reminders_list":   return tool_reminders_list(args.get("list_name", ""), args.get("limit", 20))
+        case "reminders_add":    return tool_reminders_add(args["title"], args.get("due", ""), args.get("notes", ""), args.get("list_name", "Reminders"))
+        # Calendar
+        case "calendar_list":    return tool_calendar_list(args.get("days", 7), args.get("calendar", ""))
+        case "calendar_add":     return tool_calendar_add(args["title"], args["start"], args.get("end", ""), args.get("calendar", ""), args.get("notes", ""))
         case _:                  return f"error: unknown tool '{name}'"

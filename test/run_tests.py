@@ -392,6 +392,42 @@ TESTS: list[TestCase] = [
         timeout=60,
     ),
 
+    # ── reminders ────────────────────────────────────────────────────────────
+
+    TestCase(
+        id="9.1", module="reminders",
+        name="reminders_list — 读取所有清单",
+        prompt="用reminders_list工具列出所有未完成的提醒事项",
+        reject=["error:"],
+        timeout=60,
+    ),
+
+    TestCase(
+        id="9.2", module="reminders",
+        name="reminders_add — 添加带截止日期的提醒",
+        prompt="用reminders_add工具添加一个提醒：标题'wisp集成测试提醒'，截止日期2099-12-31 09:00，清单Reminders",
+        expect=["ok:"],
+        timeout=60,
+    ),
+
+    # ── calendar ─────────────────────────────────────────────────────────────
+
+    TestCase(
+        id="10.1", module="calendar",
+        name="calendar_list — 读取未来7天日程",
+        prompt="用calendar_list工具列出未来7天的日历事件",
+        reject=["error:"],
+        timeout=60,
+    ),
+
+    TestCase(
+        id="10.2", module="calendar",
+        name="calendar_add — 添加日历事件",
+        prompt="用calendar_add工具添加一个事件：标题'wisp集成测试事件'，开始时间2099-12-31 10:00，结束时间2099-12-31 11:00",
+        expect=["ok:"],
+        timeout=60,
+    ),
+
     # ── browser (SKIP — 需人工) ────────────────────────────────────────────────
 
     TestCase(
@@ -436,7 +472,7 @@ def _status_icon(status: str) -> str:
 
 
 def print_results(results: list[tuple[TestCase, str, str, float]]) -> None:
-    print(f"\n{C.BOLD}══ Wisp Test Suite v0.6 {'═' * (_WIDTH - 23)}{C.RESET}\n")
+    print(f"\n{C.BOLD}══ Wisp Test Suite v0.7 {'═' * (_WIDTH - 23)}{C.RESET}\n")
 
     current_module = ""
     passed = failed = skipped = timedout = 0

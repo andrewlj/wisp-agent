@@ -96,7 +96,7 @@ python agent.py "帮我统计桌面上有多少个文件"
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (29 total)
+## Tools (33 total)
 
 | Category | Tools |
 |----------|-------|
@@ -105,6 +105,8 @@ python agent.py "帮我统计桌面上有多少个文件"
 | File ops | `find_files`, `move_file`, `copy_file`, `delete_file` |
 | Network | `http_get`, `http_post` |
 | Browser | `browser_open`, `browser_click`, `browser_type`, `browser_get_text`, `browser_screenshot`, `browser_close` |
+| Reminders | `reminders_list`, `reminders_add` |
+| Calendar | `calendar_list`, `calendar_add` |
 | Task | `task_init`, `task_step_done`, `task_step_fail` |
 | News | `daily_briefing` |
 | Learn | `learn` |

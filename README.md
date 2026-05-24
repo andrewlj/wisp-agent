@@ -12,9 +12,11 @@ A lightweight local macOS intelligent assistant powered by any OpenAI-compatible
 - **Self-learning** — agent records mistakes automatically; post-task reflection writes rules to `knowledge.md`
 - **Session persistence** — save, restore, and browse conversation history
 - **Task checkpoint system** — multi-step task tracking with recovery support
-- **Context compression** — auto-summarises old messages when context grows large
-- **Daily briefing** — generates a translated, summarised HTML news report from global sources
+- **Context compression** — auto-summarises old messages when context grows large; errors preserved verbatim
+- **Daily briefing** — config-driven HTML news report from global sources (`briefing.yaml`)
 - **Workspace sandbox** — all file outputs confined to `~/wisp/workspace`; writes outside are blocked
+- **LLM retry** — exponential-backoff retry on connection errors and 5xx; stalled streams time out cleanly
+- **Debug mode** — per-tool timing, real token counts, task summary
 
 ## Requirements
 
@@ -88,7 +90,9 @@ python agent.py "帮我统计桌面上有多少个文件"
 | `/reset` | Clear conversation history |
 | `/tasks` | List saved task checkpoints |
 | `/resume <task-id>` | Resume an interrupted multi-step task |
-| `/debug` | Toggle verbose output (full args, full results, token count) |
+| `/knowledge` | Show learned tool usage rules |
+| `/knowledge forget <keyword>` | Remove rules containing keyword |
+| `/debug` | Toggle verbose output (tool timing, real tokens, task summary) |
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
@@ -112,8 +116,7 @@ All persistent data lives under `~/wisp/`:
 ```
 ~/wisp/
 ├── workspace/          # agent file outputs (reports, screenshots, downloads)
-│   ├── daily-report/   # generated HTML briefings
-│   └── screenshots/
+│   └── daily-report/   # generated HTML briefings
 ├── sessions/           # saved conversation histories
 ├── tasks/              # multi-step task checkpoints
 └── knowledge.md        # learned tool usage rules (grows over time)
@@ -125,7 +128,8 @@ All persistent data lives under `~/wisp/`:
 wisp-agent/
 ├── agent.py              # Main loop, REPL, context compression, API
 ├── tools.py              # All tool schemas and implementations
-├── briefing.py           # Daily news briefing generator
+├── briefing.py           # Daily news briefing generator (processing only)
+├── briefing.yaml         # Briefing sources, domains, and filters (edit freely)
 ├── session.py            # Session save/load/list
 ├── task.py               # Task checkpoint system
 ├── knowledge.py          # Tool knowledge base (read/write knowledge.md)
@@ -146,27 +150,49 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 ▶ 生成今日简报
 ```
 
-**Sections covered:**
+**Sections covered** (defined in `briefing.yaml`, fully customisable):
 - 🌍 政治国际 — Reuters, AP, BBC
-- 💡 ICT 前沿研究与技术突破 — Nature, IEEE, MIT Technology Review, DeepMind, HuggingFace, Ars Technica
-- 🏢 高科技企业重大新闻 — The Verge, Wired, Ars Technica, MIT TR
+- 💡 ICT 前沿研究 — Nature, IEEE, MIT Technology Review, DeepMind, HuggingFace, Ars Technica
+- 🏢 高科技企业 — The Verge, Wired, Ars Technica, MIT TR
 - 🇮🇪 爱尔兰新闻 — RTÉ, Irish Times, Irish Independent, The Journal
-- 🎬 娱乐 — Variety, Deadline, Hollywood Reporter, Billboard
 - 🇨🇳 中国要闻 — BBC, AP
 
-**How it works:** RSS/page sources → per-source cap + keyword filtering → 1 LLM call per section (translate + summarise, JSON mode) → HTML report saved to `~/wisp/workspace/daily-report/`
+**How it works:** RSS/page sources → per-source cap + keyword filtering → LLM translate + summarise → HTML report saved to `~/wisp/workspace/daily-report/`
+
+**Adding a new section:** add a block to `briefing.yaml` — no Python changes needed.
 
 ---
 
 ## Development Log
 
-### v0.5 — Identity, Soul & Self-Learning
+### v0.6 — Stability, Debug & Config-driven Briefing
 
-**Design philosophy re-anchored**
-- Wisp is a lightweight local macOS intelligent assistant — not a general-purpose chatbot
-- Tasks are completed via tool combinations; if tools can't do it, Wisp says so
-- Minimal interaction: execute, confirm destructive actions, report — no discussion
-- Wisp never autonomously sends user data outside the Mac
+**Stability**
+- `_llm_post()`: central HTTP layer with exponential-backoff retry (up to 3×, 1/2/4s delays)
+  - Retries: `ConnectionError`, `ReadTimeout`, HTTP 5xx
+  - No retry: HTTP 4xx (auth / bad request)
+  - Unified timeout: connect 10s, read 120s
+- Context compression: errors and non-zero exits preserved verbatim; ok-results trimmed to 120 chars; prompt explicitly retains failed steps and open tasks
+
+**Debug mode enhancements** (`/debug`)
+- Per-tool execution timing on every result line (`[1.24s]`)
+- Real token counts from API response (`prompt N · completion M · llm Xs`)
+- Task summary line after `done`: `── 3 turns · 12.4s · bash×3 · read_file×2 ──`
+
+**Config-driven briefing**
+- All section/source/filter config moved to `briefing.yaml`; `briefing.py` is processing-only
+- Generic `_apply_filter()` replaces all section-specific filter functions
+- HTML section order driven by YAML; new sections require zero Python changes
+- Translation retry: items with English title or empty summary get a dedicated single-item LLM call
+
+**Knowledge base**
+- `/knowledge forget <keyword>` — removes all rules containing keyword (case-insensitive)
+
+**Bug fixes**
+- Bash scanner false-positive on `2>/dev/null`
+- Briefing filter fixes: Ireland 0→3+, China 0→5, ICT Business 1→3+
+
+### v0.5 — Identity, Soul & Self-Learning
 
 **Soul (`soul.md`)**
 - Immutable core identity and constraints, always injected first in the system prompt
@@ -174,90 +200,45 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 
 **Profile (`profile.yaml`) + First-launch onboarding**
 - 3-question interactive setup on first launch: name, style, language
-- Timezone auto-detected from system
-- Generates `profile.yaml` (git-ignored); edit anytime
-- Profile injects user info, agent persona, and tool behaviors into the system prompt
-
-**System prompt layering**
-- Soul → persona → user info → behaviors → tool knowledge → environment rules
-- Each layer is optional; missing sections are skipped cleanly
+- Timezone auto-detected from system; generates `profile.yaml` (git-ignored)
 
 **Tool knowledge base (`knowledge.md`)**
 - Learned tool usage rules stored in `~/wisp/knowledge.md`
 - Always injected into system prompt so rules apply from the first turn
-- `/knowledge` REPL command to inspect current rules
 
 **Self-learning (two layers)**
 - Layer 1 — in-task: agent calls `learn()` immediately when user corrects a mistake
-- Layer 2 — post-task: `_post_task_reflect()` scans every completed task for tool errors
-  and user corrections; fires a lightweight LLM call (json_mode, 256 tokens) to extract
-  up to 3 generalised rules and appends them to `knowledge.md`
-- Rules are quality-checked: must mention a tool name; near-duplicates (≥75% word overlap) are skipped
+- Layer 2 — post-task: `_post_task_reflect()` scans completed tasks for tool errors and corrections; fires a lightweight LLM call to extract up to 3 generalised rules
 
 ### v0.4 — Sessions, Tasks, Briefing & Robustness
 
-**Session persistence**
-- `/save`, `/load`, `/sessions`, `/new` commands to manage conversation history
-- Sessions stored in `~/wisp/sessions/`; auto-saved after every agent loop
-
-**Task checkpoint system**
-- `task_init` / `task_step_done` / `task_step_fail` tools for multi-step task tracking
-- `/tasks` and `/resume <task-id>` REPL commands for recovery after interruptions
-- System prompt instructs the agent to use task tracking for any 3+ step task
-
-**Context compression**
-- Auto-triggers when estimated token count exceeds `context_limit`
-- Summarises the middle portion of the conversation with a single LLM call
-- Keeps the system prompt and the most recent `context_keep_recent` messages verbatim
-
-**Debug toggle**
-- `/debug` REPL command: enables full tool argument printing, untruncated results, and per-turn token count
-
-**Browser timeout control**
-- `browser_timeout` config option; all Playwright operations share a single configurable timeout
-
-**Daily briefing tool**
-- `daily_briefing(sections, open_browser)` — full HTML news report in one agent call
-- LLM called with `response_format=json_object` for reliable structured output
-- `<think>…</think>` stripping for Qwen reasoning models
-- Per-source feed cap ensures all sources get representation (prevents one prolific RSS from dominating)
-- Summary validation rejects degenerate LLM output (pure-numeric strings, too-short text)
-- History-based dedup: articles seen in the past 7 days are skipped
-- Section-level error isolation: one fetch failure never blocks the rest
-
-**Data directory restructure**
-- All wisp data unified under `~/wisp/` (sessions, tasks, workspace, future memory)
+- Session persistence (`/save`, `/load`, `/sessions`, `/new`)
+- Task checkpoint system (`task_init` / `task_step_done` / `task_step_fail`, `/tasks`, `/resume`)
+- Context compression (auto-triggered at `context_limit` tokens)
+- Daily briefing tool with JSON-mode LLM, history dedup, per-source cap
+- `/debug` toggle; browser timeout control
 
 ### v0.3 — Security Controls & Stability
-- **Workspace sandbox**: all agent file outputs confined to `~/wisp/workspace`; writes/deletes outside blocked at tool level
-- **Bash risk scanner**: regex detection of destructive commands (`rm -rf`, `sudo rm`, `dd`, `mkfs`, `chmod 777`) and out-of-workspace shell redirects
-- **asyncio fix**: lazy-loaded Playwright + `PromptSession(in_thread=True)`
-- **`find_files` path fix**: handles `~`, `$VAR`, and glob patterns correctly
-- **Config additions**: `workspace`, `strict_workspace`
+- Workspace sandbox: file writes outside `~/wisp/workspace` blocked at tool level
+- Bash risk scanner: regex detection of destructive commands and out-of-workspace shell redirects
 
 ### v0.2 — Mac Automation & Tool Expansion
-- Added 14 new tools across 4 categories (mac system, file ops, network, browser)
-- Refactored tool definitions into `tools.py`
+- 14 new tools across mac system, file ops, network, browser categories
 - Browser automation via Playwright (Chromium)
 - File search powered by macOS Spotlight (`mdfind`)
-- Safe file deletion (moves to Trash via Finder)
 
 ### v0.1 — Core Agent + Interactive Experience
 - ReAct loop with streaming output (SSE)
 - Multi-turn conversation with in-memory history
-- Colored terminal output (ANSI) + ASCII banner
-- Chinese input fix via `prompt_toolkit`
-- macOS-aware system prompt (BSD command syntax)
-- YAML config file
-- Initial tools: `bash`, `read_file`, `write_file`, `done`, `osascript`, `clipboard_read/write`, `screenshot`, `open`
+- Colored terminal output + ASCII banner
+- Chinese input via `prompt_toolkit`; macOS-aware system prompt
 
 ---
 
 ## Roadmap
 
-- [ ] Bash out-of-Mac data transfer detection (enforce soul's data privacy constraint at tool level)
+- [ ] Gateway architecture — Unix socket IPC + Telegram bot adapter for remote Mac control
 - [ ] Tool set expansion — more reliable automation coverage
-- [ ] `/knowledge forget <keyword>` — delete specific learned rules
 
 ## License
 

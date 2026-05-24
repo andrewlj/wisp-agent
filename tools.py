@@ -76,7 +76,7 @@ _RISKY = [
 # Patterns that write to a file path (shell redirects + tee + common write tools)
 _WRITE_OPS = re.compile(
     r"(?:>>?|tee\s+|tee\s+-a\s+|cp\s+\S+\s+|mv\s+\S+\s+)"
-    r"([~/\$][^\s;|&>]+)"
+    r"\s*([~/\$][^\s;|&>]+)"
 )
 
 def _bash_risk(command: str) -> str | None:
@@ -559,7 +559,10 @@ def tool_delete_file(path: str) -> str:
     if not p.exists():
         return f"error: path not found: {p}"
     script = f'tell application "Finder" to delete POSIX file "{p}"'
-    return _run(["osascript", "-e", script])
+    result = _run(["osascript", "-e", script])
+    if "[exit 0]" in result:
+        return f"ok: moved to Trash: {p}"
+    return result
 
 
 # ── Network ───────────────────────────────────────────────────────────────────

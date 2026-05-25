@@ -61,7 +61,7 @@ _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
 
 _SOUL_PATH    = Path(__file__).parent / "soul.md"
 _PROFILE_PATH = Path(__file__).parent / "profile.yaml"
-_profile: dict = {}   # module-level; set at startup, used by run_agent
+_profile = {}   # module-level; set at startup, used by run_agent
 
 def _load_soul() -> str:
     if _SOUL_PATH.exists():
@@ -1079,7 +1079,6 @@ def interactive() -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         oneshot_task = " ".join(sys.argv[1:]).strip()
-        global _profile
         _profile  = _load_profile()
         messages  = [{"role": "system", "content": _build_system_prompt(_profile)}]
         run_agent(oneshot_task, messages)

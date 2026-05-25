@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -409,19 +411,25 @@ TESTS: list[UnitTest] = [
 
     UnitTest(
         id="u9.1", module="tool_reminders",
-        name="reminders_list — 读取不报错",
-        fn=lambda: _assert_not_contains(tool_reminders_list(), "error:"),
+        name="reminders_list — due_before 过滤不报错",
+        fn=lambda: _assert_not_contains(
+            tool_reminders_list(due_before=date.today().strftime("%Y-%m-%d")), "error:"),
     ),
     UnitTest(
         id="u9.2", module="tool_reminders",
         name="reminders_add — 添加提醒成功",
+        setup=lambda: subprocess.run(["osascript", "-e",
+            'tell application "Reminders" to tell list "Reminders" to '
+            'delete (every reminder whose name is "wisp-unit-test-reminder")'],
+            capture_output=True),
         fn=lambda: _assert_contains(
             tool_reminders_add("wisp-unit-test-reminder", due="2099-12-31 09:00",
                                list_name="Reminders"),
             "ok:"),
-        teardown=lambda: _run(["osascript", "-e",
+        teardown=lambda: subprocess.run(["osascript", "-e",
             'tell application "Reminders" to tell list "Reminders" to '
-            'delete (every reminder whose name is "wisp-unit-test-reminder")']),
+            'delete (every reminder whose name is "wisp-unit-test-reminder")'],
+            capture_output=True),
     ),
     UnitTest(
         id="u9.3", module="tool_reminders",
@@ -443,6 +451,7 @@ TESTS: list[UnitTest] = [
     UnitTest(
         id="u10.1", module="tool_calendar",
         name="calendar_list — 读取不报错",
+        setup=lambda: subprocess.run(["open", "-a", "Calendar"], capture_output=True),
         fn=lambda: _assert_not_contains(tool_calendar_list(), "error:"),
     ),
     UnitTest(

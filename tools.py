@@ -292,8 +292,9 @@ SCHEMAS: list[dict] = [
     _fn("reminders_list",
         "List incomplete reminders from macOS Reminders app.",
         {
-            "list_name": {"type": "string", "description": "Optional: name of the Reminders list. Omit to read the default list. Pass \"*\" to read all lists."},
-            "limit":     {"type": "integer", "description": "Max reminders to return. Default 20."},
+            "list_name":  {"type": "string",  "description": "Optional: name of a specific Reminders list. Omit (or pass \"*\") to read all lists."},
+            "due_before": {"type": "string",  "description": "Optional: only return reminders due on or before this date (YYYY-MM-DD). Use today's date to get today's todos. Leave empty for all pending reminders."},
+            "limit":      {"type": "integer", "description": "Max reminders to return. Default 20."},
         }, []),
 
     _fn("reminders_add",
@@ -710,68 +711,110 @@ def _as_date_script(var: str, dt) -> str:
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
 
-def tool_reminders_list(list_name: str = "", limit: int = 20) -> str:
-    # "*" means all lists; empty string means first/default list (faster, avoids iCloud timeout)
-    if list_name == "*":
+def tool_reminders_list(list_name: str = "", limit: int = 20,
+                        due_before: str = "") -> str:
+    """List incomplete reminders.
+
+    list_name : "" or "*" → all lists; specific name → one list.
+    due_before: "YYYY-MM-DD" — only return reminders due on or before this date.
+                Leave empty to return all incomplete reminders (no date filter).
+    """
+    # Build list clause
+    if list_name in ("*", ""):
         list_clause = "every list"
         guard = ""
-    elif list_name:
+    else:
         list_clause = f'{{list "{list_name}"}}'
         guard = (
             f'if not (exists list "{list_name}") then\n'
             f'    return "error: list \\"{list_name}\\" not found"\n'
             f'end if\n'
         )
-    else:
-        list_clause = "{first list}"
-        guard = ""
 
-    # Batch-fetch properties (name / completed / due date) per list — much faster
-    # than accessing reminder objects one by one. Scan at most 5 lists.
+    # Build optional cutoff date block (injected into AppleScript)
+    cutoff_block = ""
+    use_cutoff   = False
+    if due_before:
+        dt = _parse_dt(due_before)
+        if dt is None:
+            return f'error: invalid due_before date "{due_before}" — use YYYY-MM-DD'
+        # end-of-day of the cutoff date (23:59:59)
+        cutoff_block = (
+            f"set cutoff to current date\n"
+            f"set year of cutoff to {dt.year}\n"
+            f"set month of cutoff to {dt.month}\n"
+            f"set day of cutoff to {dt.day}\n"
+            f"set time of cutoff to 86399\n"
+        )
+        use_cutoff = True
+
+    date_filter = (
+        # skip reminders with no due date when filtering, or due after cutoff
+        "if dd is missing value then\n"
+        "    -- no due date: skip when date filter is active\n"
+        "else if dd > cutoff then\n"
+        "    -- due after cutoff: skip\n"
+        "else\n"
+        "    set showItem to true\n"
+        "end if\n"
+        if use_cutoff else
+        # no filter: show reminders with or without due date
+        "set showItem to true\n"
+    )
+
     script = f"""
 tell application "Reminders"
     {guard}
+    {cutoff_block}
     set theLists to {list_clause}
     set output to ""
     set counter to 0
     set listNum to 0
     repeat with theList in theLists
         set listNum to listNum + 1
-        if listNum > 5 then exit repeat
+        if listNum > 10 then exit repeat
         set listLabel to name of theList
-        set rNames to name of every reminder of theList
-        set rDones to completed of every reminder of theList
-        set rDues  to due date of every reminder of theList
-        repeat with i from 1 to count of rNames
-            if counter >= {limit} then exit repeat
-            if item i of rDones is false then
-                set itemLine to listLabel & " | " & item i of rNames
+        -- batch-fetch only incomplete reminders (one round-trip per property)
+        set rNames to name of (every reminder of theList whose completed is false)
+        set rDues  to due date of (every reminder of theList whose completed is false)
+        if (count of rNames) = 0 then
+        else
+            repeat with i from 1 to count of rNames
+                if counter >= {limit} then exit repeat
+                set showItem to false
                 try
                     set dd to item i of rDues
-                    if dd is not missing value then
-                        set y to year of dd as string
-                        set mo to (month of dd as integer)
-                        if mo < 10 then set mo to "0" & mo
-                        set dy to day of dd
-                        if dy < 10 then set dy to "0" & dy
-                        set t to time of dd
-                        set h to t div 3600
-                        set mi to (t mod 3600) div 60
-                        if h < 10 then set h to "0" & h
-                        if mi < 10 then set mi to "0" & mi
-                        set itemLine to itemLine & " | due: " & y & "-" & mo & "-" & dy & " " & h & ":" & mi
-                    end if
+                    {date_filter}
                 end try
-                set output to output & itemLine & "\\n"
-                set counter to counter + 1
-            end if
-        end repeat
+                if showItem then
+                    set itemLine to listLabel & " | " & item i of rNames
+                    try
+                        set dd to item i of rDues
+                        if dd is not missing value then
+                            set y to year of dd as string
+                            set mo to (month of dd as integer)
+                            if mo < 10 then set mo to "0" & mo
+                            set dy to day of dd
+                            if dy < 10 then set dy to "0" & dy
+                            set t to time of dd
+                            set h to t div 3600
+                            set mi to (t mod 3600) div 60
+                            if h < 10 then set h to "0" & h
+                            if mi < 10 then set mi to "0" & mi
+                            set itemLine to itemLine & " | due: " & y & "-" & mo & "-" & dy & " " & h & ":" & mi
+                        end if
+                    end try
+                    set output to output & itemLine & "\\n"
+                    set counter to counter + 1
+                end if
+            end repeat
+        end if
     end repeat
     if output is "" then return "no pending reminders"
     return output
 end tell
 """
-    return _osascript_clean(script, timeout=60)
+    return _osascript_clean(script, timeout=90)
 
 
 def tool_reminders_add(title: str, due: str = "", notes: str = "",
@@ -1010,7 +1053,7 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "task_step_fail":   return tool_task_step_fail(args["task_id"], args["step_id"], args.get("reason", ""))
         case "learn":            return tool_learn(args["rule"], args.get("category", "general"))
         # Reminders
-        case "reminders_list":   return tool_reminders_list(args.get("list_name", ""), args.get("limit", 20))
+        case "reminders_list":   return tool_reminders_list(args.get("list_name", ""), args.get("limit", 20), args.get("due_before", ""))
         case "reminders_add":    return tool_reminders_add(args["title"], args.get("due", ""), args.get("notes", ""), args.get("list_name", "Reminders"))
         # Calendar
         case "calendar_list":    return tool_calendar_list(args.get("days", 7), args.get("calendar", ""))

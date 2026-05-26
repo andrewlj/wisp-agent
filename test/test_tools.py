@@ -58,6 +58,10 @@ from tools import (
     tool_reminders_add,
     tool_calendar_list,
     tool_calendar_add,
+    tool_notes_list,
+    tool_notes_read,
+    tool_notes_create,
+    tool_notes_append,
 )
 
 init_workspace(str(WORKSPACE), strict=True)
@@ -494,6 +498,71 @@ TESTS: list[UnitTest] = [
         fn=lambda: _assert_contains(
             tool_calendar_list(calendar_name="wisp-nonexistent-cal-zzzz"),
             "error:"),
+    ),
+
+    # ── tool_notes ────────────────────────────────────────────────────────────
+
+    UnitTest(
+        id="u11.1", module="tool_notes",
+        name="notes_list — 读取不报错",
+        fn=lambda: _assert_not_contains(tool_notes_list(limit=5), "error:"),
+    ),
+    UnitTest(
+        id="u11.2", module="tool_notes",
+        name="notes_create — 新建笔记成功",
+        setup=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp-unit-test-note")'],
+            capture_output=True),
+        fn=lambda: _assert_contains(
+            tool_notes_create("wisp-unit-test-note", "unit test content\nline 2"),
+            "ok:"),
+        teardown=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp-unit-test-note")'],
+            capture_output=True),
+    ),
+    UnitTest(
+        id="u11.3", module="tool_notes",
+        name="notes_read — 读取存在的笔记",
+        setup=lambda: tool_notes_create("wisp-unit-test-note", "hello notes"),
+        fn=lambda: _assert_contains(tool_notes_read("wisp-unit-test-note"), "hello notes"),
+        teardown=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp-unit-test-note")'],
+            capture_output=True),
+    ),
+    UnitTest(
+        id="u11.4", module="tool_notes",
+        name="notes_read — 不存在的笔记返回 error",
+        fn=lambda: _assert_contains(
+            tool_notes_read("wisp-nonexistent-note-zzzz"), "error:"),
+    ),
+    UnitTest(
+        id="u11.5", module="tool_notes",
+        name="notes_append — 追加内容成功",
+        setup=lambda: tool_notes_create("wisp-unit-test-note", "original content"),
+        fn=lambda: _assert_contains(
+            tool_notes_append("wisp-unit-test-note", "appended line"),
+            "ok:"),
+        teardown=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp-unit-test-note")'],
+            capture_output=True),
+    ),
+    UnitTest(
+        id="u11.6", module="tool_notes",
+        name="notes_append — 追加后内容可读取",
+        setup=lambda: (
+            tool_notes_create("wisp-unit-test-note", "original"),
+            tool_notes_append("wisp-unit-test-note", "appended"),
+        ),
+        fn=lambda: _assert_contains(
+            tool_notes_read("wisp-unit-test-note"), "appended"),
+        teardown=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp-unit-test-note")'],
+            capture_output=True),
     ),
 ]
 

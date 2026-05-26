@@ -324,6 +324,37 @@ SCHEMAS: list[dict] = [
             "notes":    {"type": "string", "description": "Optional event notes."},
         }, ["title", "start"]),
 
+    # ── Notes ─────────────────────────────────────────────────────────────────
+    _fn("notes_list",
+        "List notes from macOS Notes app.",
+        {
+            "folder": {"type": "string",  "description": "Folder name to list. Omit or pass \"*\" for all folders. Default folder if empty."},
+            "limit":  {"type": "integer", "description": "Max notes to return. Default 20."},
+        }, []),
+
+    _fn("notes_read",
+        "Read the content of a note from macOS Notes app by title.",
+        {
+            "title":  {"type": "string", "description": "Note title (exact or partial match)."},
+            "folder": {"type": "string", "description": "Optional: folder to search in. Omit to search all folders."},
+        }, ["title"]),
+
+    _fn("notes_create",
+        "Create a new note in macOS Notes app.",
+        {
+            "title":   {"type": "string", "description": "Note title."},
+            "content": {"type": "string", "description": "Note body text (plain text or simple markdown)."},
+            "folder":  {"type": "string", "description": "Optional: target folder name. Creates folder if not exists. Default: first folder."},
+        }, ["title", "content"]),
+
+    _fn("notes_append",
+        "Append text to an existing note in macOS Notes app.",
+        {
+            "title":   {"type": "string", "description": "Note title (exact or partial match)."},
+            "content": {"type": "string", "description": "Text to append."},
+            "folder":  {"type": "string", "description": "Optional: folder to search in."},
+        }, ["title", "content"]),
+
     # ── Daily briefing ────────────────────────────────────────────────────────
     _fn("daily_briefing",
         "Generate today's global news briefing as an HTML report. "
@@ -971,6 +1002,177 @@ return "ok"
     return result
 
 
+# ── Notes ────────────────────────────────────────────────────────────────────
+
+def _notes_folder_clause(folder: str) -> tuple[str, str]:
+    """Return (folder_clause, guard) for AppleScript Notes queries."""
+    if folder in ("*", ""):
+        return "every folder", ""
+    f = folder.replace('"', '\\"')
+    guard = (
+        f'if not (exists folder "{f}") then\n'
+        f'    return "error: folder \\"{f}\\" not found"\n'
+        f'end if\n'
+    )
+    return f'{{folder "{f}"}}', guard
+
+
+def _notes_fmt_date(var: str) -> str:
+    """AppleScript snippet to format a date variable into YYYY-MM-DD."""
+    return f"""
+set _y to year of {var} as string
+set _m to (month of {var} as integer)
+if _m < 10 then set _m to "0" & _m
+set _d to day of {var}
+if _d < 10 then set _d to "0" & _d
+set _dateStr to _y & "-" & _m & "-" & _d
+"""
+
+
+def tool_notes_list(folder: str = "", limit: int = 20) -> str:
+    folder_clause, guard = _notes_folder_clause(folder)
+    fmt = _notes_fmt_date("modDate")
+    script = f"""
+tell application "Notes"
+    {guard}
+    set theFolders to {folder_clause}
+    set output to ""
+    set counter to 0
+    repeat with f in theFolders
+        set fName to name of f
+        set nTitles to name of every note of f
+        set nDates  to modification date of every note of f
+        repeat with i from 1 to count of nTitles
+            if counter >= {limit} then exit repeat
+            set modDate to item i of nDates
+            {fmt}
+            set output to output & fName & " | " & item i of nTitles & " | modified: " & _dateStr & "\\n"
+            set counter to counter + 1
+        end repeat
+        if counter >= {limit} then exit repeat
+    end repeat
+    if output is "" then return "no notes found"
+    return output
+end tell
+"""
+    return _osascript_clean(script, timeout=30)
+
+
+def tool_notes_read(title: str, folder: str = "") -> str:
+    t = title.replace('"', '\\"')
+    if folder and folder != "*":
+        f = folder.replace('"', '\\"')
+        search_clause = f'notes of folder "{f}" whose name contains "{t}"'
+        guard = (
+            f'if not (exists folder "{f}") then\n'
+            f'    return "error: folder \\"{f}\\" not found"\n'
+            f'end if\n'
+        )
+    else:
+        search_clause = f'notes whose name contains "{t}"'
+        guard = ""
+
+    script = f"""
+tell application "Notes"
+    {guard}
+    set matches to {search_clause}
+    if (count of matches) = 0 then
+        return "error: no note found matching \\"{t}\\""
+    end if
+    set theNote to item 1 of matches
+    set nTitle to name of theNote
+    -- plaintext always starts with the title as first line; strip it
+    set rawText to plaintext of theNote
+    set tid to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to "\\n"
+    set allLines to text items of rawText
+    set AppleScript's text item delimiters to tid
+    if (count of allLines) > 1 then
+        set bodyLines to items 2 thru -1 of allLines
+        set AppleScript's text item delimiters to "\\n"
+        set nBody to bodyLines as string
+        set AppleScript's text item delimiters to tid
+    else
+        set nBody to ""
+    end if
+    return "title: " & nTitle & "\\n---\\n" & nBody
+end tell
+"""
+    return _osascript_clean(script, timeout=20)
+
+
+def tool_notes_create(title: str, content: str, folder: str = "") -> str:
+    t = title.replace('"', '\\"')
+    # Notes body: wrap plain text in basic HTML (preserves line breaks)
+    body_html = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    body_html = body_html.replace("\n", "<br>")
+    body_escaped = body_html.replace('"', '\\"')
+
+    if folder and folder != "*":
+        f = folder.replace('"', '\\"')
+        make_cmd = (
+            f'if not (exists folder "{f}") then\n'
+            f'    make new folder with properties {{name:"{f}"}}\n'
+            f'end if\n'
+            f'tell folder "{f}"\n'
+            f'    make new note with properties {{name:"{t}", body:"{body_escaped}"}}\n'
+            f'end tell\n'
+        )
+    else:
+        # No folder specified — let Notes choose the default location
+        make_cmd = f'make new note with properties {{name:"{t}", body:"{body_escaped}"}}'
+
+    script = f"""
+tell application "Notes"
+    {make_cmd}
+end tell
+return "ok"
+"""
+    result = _osascript_clean(script, timeout=20)
+    if result == "ok":
+        folder_hint = f" in '{folder}'" if folder and folder != "*" else ""
+        return f"ok: created note '{title}'{folder_hint}"
+    return result
+
+
+def tool_notes_append(title: str, content: str, folder: str = "") -> str:
+    t = title.replace('"', '\\"')
+    # Escape content for AppleScript
+    body_html = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    body_html = body_html.replace("\n", "<br>")
+    body_escaped = body_html.replace('"', '\\"')
+
+    if folder and folder != "*":
+        f = folder.replace('"', '\\"')
+        search_clause = f'notes of folder "{f}" whose name contains "{t}"'
+        guard = (
+            f'if not (exists folder "{f}") then\n'
+            f'    return "error: folder \\"{f}\\" not found"\n'
+            f'end if\n'
+        )
+    else:
+        search_clause = f'notes whose name contains "{t}"'
+        guard = ""
+
+    script = f"""
+tell application "Notes"
+    {guard}
+    set matches to {search_clause}
+    if (count of matches) = 0 then
+        return "error: no note found matching \\"{t}\\""
+    end if
+    set theNote to item 1 of matches
+    set currentBody to body of theNote
+    set body of theNote to currentBody & "<br><br>{body_escaped}"
+end tell
+return "ok"
+"""
+    result = _osascript_clean(script, timeout=20)
+    if result == "ok":
+        return f"ok: appended to note '{title}'"
+    return result
+
+
 # ── Daily briefing ───────────────────────────────────────────────────────────
 
 def tool_daily_briefing(open_browser: bool = True,
@@ -1058,4 +1260,9 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         # Calendar
         case "calendar_list":    return tool_calendar_list(args.get("days", 7), args.get("calendar", ""))
         case "calendar_add":     return tool_calendar_add(args["title"], args["start"], args.get("end", ""), args.get("calendar", ""), args.get("notes", ""))
+        # Notes
+        case "notes_list":       return tool_notes_list(args.get("folder", ""), args.get("limit", 20))
+        case "notes_read":       return tool_notes_read(args["title"], args.get("folder", ""))
+        case "notes_create":     return tool_notes_create(args["title"], args["content"], args.get("folder", ""))
+        case "notes_append":     return tool_notes_append(args["title"], args["content"], args.get("folder", ""))
         case _:                  return f"error: unknown tool '{name}'"

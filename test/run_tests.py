@@ -440,6 +440,64 @@ TESTS: list[TestCase] = [
         timeout=60,
     ),
 
+    # ── notes ─────────────────────────────────────────────────────────────────
+
+    TestCase(
+        id="11.1", module="notes",
+        name="notes_list — 列出笔记",
+        prompt="用notes_list工具列出最近5条笔记，传入limit=5",
+        reject=["error:"],
+        timeout=60,
+    ),
+
+    TestCase(
+        id="11.2", module="notes",
+        name="notes_create — 新建笔记",
+        prompt="用notes_create工具新建一篇笔记，标题'wisp集成测试笔记'，内容'这是一条自动化测试创建的笔记。'",
+        expect=["ok:"],
+        setup=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp集成测试笔记")'],
+            capture_output=True),
+        teardown=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp集成测试笔记")'],
+            capture_output=True),
+        timeout=60,
+    ),
+
+    TestCase(
+        id="11.3", module="notes",
+        name="notes_read — 读取笔记内容",
+        prompt="用notes_read工具读取标题为'wisp集成测试笔记'的笔记内容",
+        expect=["自动化测试"],
+        setup=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to make new note with properties {name:"wisp集成测试笔记", body:"这是一条自动化测试创建的笔记。"}'],
+            capture_output=True),
+        teardown=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp集成测试笔记")'],
+            capture_output=True),
+        timeout=60,
+    ),
+
+    TestCase(
+        id="11.4", module="notes",
+        name="notes_append — 追加内容到笔记",
+        prompt="用notes_append工具在'wisp集成测试笔记'笔记末尾追加文字'追加测试内容'",
+        expect=["ok:"],
+        setup=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to make new note with properties {name:"wisp集成测试笔记", body:"原始内容"}'],
+            capture_output=True),
+        teardown=lambda: subprocess.run(
+            ["osascript", "-e",
+             'tell application "Notes" to delete (notes whose name is "wisp集成测试笔记")'],
+            capture_output=True),
+        timeout=60,
+    ),
+
     # ── browser (SKIP — 需人工) ────────────────────────────────────────────────
 
     TestCase(

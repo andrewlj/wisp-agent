@@ -498,6 +498,56 @@ TESTS: list[TestCase] = [
         timeout=60,
     ),
 
+    # ── browser_plus ──────────────────────────────────────────────────────────
+
+    TestCase(
+        id="12.1", module="browser_plus",
+        name="browser_wait — 等待页面元素出现",
+        prompt="先用browser_open打开https://example.com，再用browser_wait等待文本'Example Domain'出现（text=Example Domain），告诉我结果",
+        expect_any=["ok:", "appeared", "found", "出现", "成功", "Example Domain", "检测到", "已打开"],
+        reject=["Traceback"],
+        timeout=90,
+    ),
+
+    TestCase(
+        id="12.2", module="browser_plus",
+        name="browser_scroll — 滚动页面",
+        prompt="先用browser_open打开https://example.com，再用browser_scroll向下滚动300像素，告诉我结果",
+        expect_any=["ok:", "scrolled", "滚动", "成功"],
+        reject=["Traceback"],
+        timeout=90,
+    ),
+
+    TestCase(
+        id="12.3", module="browser_plus",
+        name="browser_snapshot — 获取页面快照",
+        prompt="先用browser_open打开https://example.com，再用browser_snapshot获取当前页面结构快照，告诉我快照里有什么内容",
+        expect_any=["example.com", "Example", "title", "heading", "url"],
+        reject=["Traceback"],
+        timeout=90,
+    ),
+
+    # ── travel ────────────────────────────────────────────────────────────────
+
+    TestCase(
+        id="13.1", module="travel",
+        name="flight_search — 搜索都柏林→巴塞罗那机票",
+        prompt="用flight_search工具搜索从DUB到BCN的机票，日期2026-08-01，经济舱1名乘客",
+        expect_any=["€", "EUR", "price", "Price", "flight", "airline", "Ryanair", "Aer Lingus",
+                    "Vueling", "无结果", "没有找到", "error:"],
+        reject=["Traceback"],
+        timeout=120,
+    ),
+
+    TestCase(
+        id="13.2", module="travel",
+        name="hotel_search — 搜索都柏林酒店",
+        prompt="用hotel_search工具搜索Dublin的酒店，入住2026-08-01，退房2026-08-03，1位客人",
+        expect_any=["€", "EUR", "per night", "Hotel", "hotel", "Inn", "无结果", "没有找到", "error:"],
+        reject=["Traceback"],
+        timeout=120,
+    ),
+
     # ── browser (SKIP — 需人工) ────────────────────────────────────────────────
 
     TestCase(

@@ -462,7 +462,20 @@ TESTS: list[UnitTest] = [
     UnitTest(
         id="u10.1", module="tool_calendar",
         name="calendar_list — 读取不报错",
-        setup=lambda: subprocess.run(["open", "-a", "Calendar"], capture_output=True),
+        setup=lambda: (
+            subprocess.run(["open", "-a", "Calendar"], capture_output=True),
+            # Wait for Calendar to fully launch before running AppleScript
+            subprocess.run(
+                ["osascript", "-e",
+                 'tell application "Calendar" to repeat 10 times\n'
+                 '  try\n'
+                 '    set _ to name of first calendar\n'
+                 '    exit repeat\n'
+                 '  end try\n'
+                 '  delay 1\n'
+                 'end repeat'],
+                capture_output=True, timeout=15),
+        ),
         fn=lambda: _assert_not_contains(tool_calendar_list(), "error:"),
     ),
     UnitTest(

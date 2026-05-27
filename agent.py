@@ -951,134 +951,155 @@ def interactive() -> None:
 
     repl = PromptSession(history=InMemoryHistory())
 
-    while True:
-        try:
-            user_input = repl.prompt("▶ ", in_thread=True).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not user_input:
-            continue
+    # Save exact terminal state now so we can restore it precisely on exit.
+    # prompt_toolkit puts the terminal into raw mode; stty sane is a rough
+    # approximation — tcsetattr with the saved attrs is the exact fix.
+    import termios as _termios
+    _saved_termios = None
+    try:
+        _saved_termios = _termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        pass
 
-        # ── /commands (slash-prefixed, never sent to LLM) ─────────────────
-        if user_input.startswith("/"):
-            parts = user_input[1:].split(maxsplit=1)
-            cmd   = parts[0].lower()
-            arg   = parts[1].strip() if len(parts) > 1 else ""
-
-            if cmd in ("exit", "quit"):
+    try:
+        while True:
+            try:
+                user_input = repl.prompt("▶ ", in_thread=True).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
                 break
-
-            elif cmd == "sessions":
-                _print_sessions()
-
-            elif cmd == "save":
-                _session.save(sid, messages, name=arg)
-                print(c(C.GREEN, f"  saved as '{arg or sid}'"))
-
-            elif cmd == "load":
-                if not arg:
-                    print(c(C.RED, "  usage: /load <session-id or name>"))
+            if not user_input:
+                continue
+    
+            # ── /commands (slash-prefixed, never sent to LLM) ─────────────────
+            if user_input.startswith("/"):
+                parts = user_input[1:].split(maxsplit=1)
+                cmd   = parts[0].lower()
+                arg   = parts[1].strip() if len(parts) > 1 else ""
+    
+                if cmd in ("exit", "quit"):
+                    break
+    
+                elif cmd == "sessions":
+                    _print_sessions()
+    
+                elif cmd == "save":
+                    _session.save(sid, messages, name=arg)
+                    print(c(C.GREEN, f"  saved as '{arg or sid}'"))
+    
+                elif cmd == "load":
+                    if not arg:
+                        print(c(C.RED, "  usage: /load <session-id or name>"))
+                    else:
+                        data = _session.load(arg)
+                        if data is None:
+                            print(c(C.RED, f"  session not found: {arg}"))
+                        else:
+                            messages = data["messages"]
+                            sid      = data["id"]
+                            _task.set_session_id(sid)
+                            print(c(C.GREEN,
+                                    f"  loaded '{data.get('name') or sid}'  "
+                                    f"({data['message_count']} messages)"))
+    
+                elif cmd == "new":
+                    _session.save(sid, messages)
+                    sid      = _session.new_id()
+                    messages = [{"role": "system", "content": _sys_prompt}]
+                    _task.set_session_id(sid)
+                    _task.set_current_id(None)
+                    print(c(C.GRAY, "  new session started"))
+    
+                elif cmd == "reset":
+                    messages = [{"role": "system", "content": _sys_prompt}]
+                    _task.set_current_id(None)
+                    print(c(C.GRAY, "  history cleared"))
+    
+                elif cmd == "tasks":
+                    _print_tasks()
+    
+                elif cmd == "resume":
+                    if not arg:
+                        print(c(C.RED, "  usage: /resume <task-id>"))
+                    else:
+                        tdata = _task.load(arg)
+                        if tdata is None:
+                            print(c(C.RED, f"  task not found: {arg}"))
+                        else:
+                            if tdata.get("session_id"):
+                                sdata = _session.load(tdata["session_id"])
+                                if sdata:
+                                    messages = sdata["messages"]
+                                    sid      = sdata["id"]
+                                    _task.set_session_id(sid)
+                                    print(c(C.GREEN, f"  restored session: {sid}"))
+                            context = _task.format_resume_context(tdata)
+                            messages.append({"role": "system", "content": context})
+                            _task.set_current_id(arg)
+                            print(c(C.CYAN, context))
+    
+                elif cmd == "knowledge":
+                    if arg.startswith("forget ") or arg == "forget":
+                        kw = arg[len("forget"):].strip()
+                        if not kw:
+                            print(c(C.RED, "  usage: /knowledge forget <keyword>"))
+                        else:
+                            result = _knowledge.forget(kw)
+                            color  = C.GREEN if result.startswith("ok:") else C.RED
+                            print(c(color, f"  {result}"))
+                    else:
+                        kb = _knowledge.load()
+                        if kb:
+                            print(c(C.GRAY, kb))
+                        else:
+                            print(c(C.GRAY, "  knowledge base is empty"))
+    
+                elif cmd == "debug":
+                    global _DEBUG
+                    _DEBUG = not _DEBUG
+                    state = f"{_rgb(0,210,210)}on{C.RESET}" if _DEBUG else f"{_rgb(130,130,130)}off{C.RESET}"
+                    print(f"  debug mode {state}"
+                          + (f"  {C.DIM}{_rgb(120,90,200)}"
+                             f"(full args · full results · real tokens · tool timing · task summary)"
+                             f"{C.RESET}"
+                             if _DEBUG else ""))
+    
+                elif cmd == "help":
+                    print(c(C.GRAY,
+                        "  /sessions          list saved sessions\n"
+                        "  /save [name]       save current session\n"
+                        "  /load <name|id>    restore a session\n"
+                        "  /new               start a new session\n"
+                        "  /reset             clear current history\n"
+                        "  /tasks             list saved tasks\n"
+                        "  /resume <task-id>  resume an interrupted task\n"
+                        "  /knowledge                    show learned tool usage rules\n"
+                        "  /knowledge forget <keyword>   remove rules containing keyword\n"
+                        "  /debug             toggle verbose debug output\n"
+                        "  /exit              quit wisp"
+                    ))
+    
                 else:
-                    data = _session.load(arg)
-                    if data is None:
-                        print(c(C.RED, f"  session not found: {arg}"))
-                    else:
-                        messages = data["messages"]
-                        sid      = data["id"]
-                        _task.set_session_id(sid)
-                        print(c(C.GREEN,
-                                f"  loaded '{data.get('name') or sid}'  "
-                                f"({data['message_count']} messages)"))
-
-            elif cmd == "new":
-                _session.save(sid, messages)
-                sid      = _session.new_id()
-                messages = [{"role": "system", "content": _sys_prompt}]
-                _task.set_session_id(sid)
-                _task.set_current_id(None)
-                print(c(C.GRAY, "  new session started"))
-
-            elif cmd == "reset":
-                messages = [{"role": "system", "content": _sys_prompt}]
-                _task.set_current_id(None)
-                print(c(C.GRAY, "  history cleared"))
-
-            elif cmd == "tasks":
-                _print_tasks()
-
-            elif cmd == "resume":
-                if not arg:
-                    print(c(C.RED, "  usage: /resume <task-id>"))
-                else:
-                    tdata = _task.load(arg)
-                    if tdata is None:
-                        print(c(C.RED, f"  task not found: {arg}"))
-                    else:
-                        if tdata.get("session_id"):
-                            sdata = _session.load(tdata["session_id"])
-                            if sdata:
-                                messages = sdata["messages"]
-                                sid      = sdata["id"]
-                                _task.set_session_id(sid)
-                                print(c(C.GREEN, f"  restored session: {sid}"))
-                        context = _task.format_resume_context(tdata)
-                        messages.append({"role": "system", "content": context})
-                        _task.set_current_id(arg)
-                        print(c(C.CYAN, context))
-
-            elif cmd == "knowledge":
-                if arg.startswith("forget ") or arg == "forget":
-                    kw = arg[len("forget"):].strip()
-                    if not kw:
-                        print(c(C.RED, "  usage: /knowledge forget <keyword>"))
-                    else:
-                        result = _knowledge.forget(kw)
-                        color  = C.GREEN if result.startswith("ok:") else C.RED
-                        print(c(color, f"  {result}"))
-                else:
-                    kb = _knowledge.load()
-                    if kb:
-                        print(c(C.GRAY, kb))
-                    else:
-                        print(c(C.GRAY, "  knowledge base is empty"))
-
-            elif cmd == "debug":
-                global _DEBUG
-                _DEBUG = not _DEBUG
-                state = f"{_rgb(0,210,210)}on{C.RESET}" if _DEBUG else f"{_rgb(130,130,130)}off{C.RESET}"
-                print(f"  debug mode {state}"
-                      + (f"  {C.DIM}{_rgb(120,90,200)}"
-                         f"(full args · full results · real tokens · tool timing · task summary)"
-                         f"{C.RESET}"
-                         if _DEBUG else ""))
-
-            elif cmd == "help":
-                print(c(C.GRAY,
-                    "  /sessions          list saved sessions\n"
-                    "  /save [name]       save current session\n"
-                    "  /load <name|id>    restore a session\n"
-                    "  /new               start a new session\n"
-                    "  /reset             clear current history\n"
-                    "  /tasks             list saved tasks\n"
-                    "  /resume <task-id>  resume an interrupted task\n"
-                    "  /knowledge                    show learned tool usage rules\n"
-                    "  /knowledge forget <keyword>   remove rules containing keyword\n"
-                    "  /debug             toggle verbose debug output\n"
-                    "  /exit              quit wisp"
-                ))
-
+                    print(c(C.RED, f"  unknown command: /{cmd}  (try /help)"))
+    
+            # ── regular input → LLM ───────────────────────────────────────────
             else:
-                print(c(C.RED, f"  unknown command: /{cmd}  (try /help)"))
+                run_agent(user_input, messages, session_id=sid)
 
-        # ── regular input → LLM ───────────────────────────────────────────
-        else:
-            run_agent(user_input, messages, session_id=sid)
-
-    # Restore terminal to a sane state — prompt_toolkit's raw mode may not be
-    # fully cleaned up when we break out of the loop (visible as ^[[A on arrows).
-    import subprocess as _sp
-    _sp.run(["stty", "sane"], stderr=_sp.DEVNULL)
+    finally:
+        # Restore the exact terminal state saved before the REPL started.
+        # This is more precise than `stty sane` and handles all the attrs
+        # that prompt_toolkit modifies (echo, icanon, alternate-screen, etc.).
+        if _saved_termios is not None:
+            try:
+                _termios.tcsetattr(sys.stdin.fileno(), _termios.TCSANOW,
+                                   _saved_termios)
+            except Exception:
+                pass
+        # Belt-and-suspenders: also reset via stty in case tcsetattr misses
+        # anything (e.g. lingering alternate-screen escape).
+        import subprocess as _sp
+        _sp.run(["stty", "sane"], stderr=_sp.DEVNULL)
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 

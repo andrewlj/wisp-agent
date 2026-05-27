@@ -100,7 +100,7 @@ python agent.py "帮我统计桌面上有多少个文件"
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (45 total)
+## Tools (43 total)
 
 | Category | Tools |
 |----------|-------|
@@ -173,6 +173,34 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 ---
 
 ## Development Log
+
+### v0.8 — Travel via SerpAPI, Terminal Fixes
+
+**Travel search rewritten on SerpAPI**
+- `flight_search` and `hotel_search` now use SerpAPI's structured-JSON access
+  to Google Flights / Google Hotels — no more browser scraping
+- Previous Playwright-based approach was fragile: depended on DOM placeholders,
+  modal-dialog focus behaviour, tfs protobuf encoding, and the search button
+  having to be clicked after URL navigation. Any UI change broke it.
+- New approach: one HTTPS call returns clean JSON; output is a formatted
+  table with airline, times, duration, stops, price (and for hotels: rating,
+  reviews, hotel class, amenities, per-night & total price)
+- Net code change: -74 lines in `tools.py`; +1 config field (`serpapi.api_key`)
+- Free tier: 100 searches/month shared across flights + hotels
+  ([signup](https://serpapi.com/users/sign_up))
+- Removed ~250 lines of dead helpers: `_ensure_google_consent`,
+  `_flights_fill_airport`, `_flights_fill_date`, `_flights_patch_tfs_dates`,
+  `_browser_dismiss_consent`
+
+**Terminal restore on REPL exit**
+- `/exit`, Ctrl-C, and unhandled exceptions all now restore the terminal
+  exactly to its pre-REPL state via `termios.tcgetattr` + `tcsetattr`
+- Replaces the previous `stty sane` approximation which sometimes left
+  the terminal in raw mode (no echo, ^[[A on arrows)
+- Wrapped REPL loop in `try/finally` so cleanup runs unconditionally
+
+**Bug fixes**
+- Bash risk scanner no longer false-positives on `format=` in URL query strings
 
 ### v0.7 — Reminders, Calendar, Notes & Test Suite
 

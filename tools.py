@@ -320,8 +320,9 @@ SCHEMAS: list[dict] = [
     # ── Travel search ──────────────────────────────────────────────────────────
     _fn("flight_search",
         "Search for flights on Google Flights via browser automation. "
-        "Returns a structured list of flight options with prices, times, and airlines. "
-        "Use IATA codes (PEK, DUB, LHR) or city names for origin/destination.",
+        "Returns airline names, departure/arrival times, duration, stops, and prices. "
+        "Covers all major and budget airlines including European low-cost carriers "
+        "(Ryanair, easyJet, Wizz Air, etc.). Use city names or IATA codes.",
         {
             "origin":      {"type": "string",  "description": "Departure city or IATA code (e.g. 'PEK', 'Dublin')"},
             "destination": {"type": "string",  "description": "Arrival city or IATA code (e.g. 'DUB', 'London')"},
@@ -709,8 +710,14 @@ def tool_http_post(url: str, body: dict, headers: dict | None = None) -> str:
 # ── Browser ───────────────────────────────────────────────────────────────────
 
 def _browser_dismiss_consent(page) -> None:
-    """Auto-click 'Reject All' / 'Accept All' on Google consent screens."""
-    for label in ["全部拒绝", "Reject all", "Reject All", "全部接受", "Accept all"]:
+    """Auto-dismiss cookie/consent banners and bot-check press-and-hold challenges."""
+    # 1. Standard click-to-accept banners
+    candidates = [
+        "全部拒绝", "Reject all", "Reject All",       # Google zh/en
+        "Accept all cookies", "Accept all", "Reject",  # Skyscanner
+        "全部接受", "Accept",                           # fallback
+    ]
+    for label in candidates:
         try:
             btn = page.locator(f"button:has-text(\"{label}\")")
             if btn.count() > 0:
@@ -719,6 +726,26 @@ def _browser_dismiss_consent(page) -> None:
                 return
         except Exception:
             continue
+
+    # 2. "PRESS & HOLD" bot-check (Skyscanner / DataDome style)
+    try:
+        hold_btn = page.locator(
+            "button:has-text('PRESS & HOLD'), "
+            "[class*='press-and-hold'], [class*='press_hold'], "
+            "[id*='hold'], [data-testid*='hold']"
+        )
+        if hold_btn.count() > 0:
+            box = hold_btn.first.bounding_box()
+            if box:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                page.mouse.move(cx, cy)
+                page.mouse.down()
+                page.wait_for_timeout(2500)   # hold 2.5 seconds
+                page.mouse.up()
+                page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
 
 
 def tool_browser_open(url: str) -> str:
@@ -883,20 +910,15 @@ def tool_flight_search(origin: str, destination: str, date: str,
                        cabin: str = "economy") -> str:
     """Search flights on Google Flights via browser automation.
 
-    origin / destination: IATA airport code or city name (e.g. 'PEK', 'Dublin').
+    origin / destination: city name or IATA code (e.g. 'Dublin', 'PEK', 'London').
     date / return_date  : YYYY-MM-DD. Omit return_date for one-way.
     cabin               : economy | business | first
-    Returns structured text of flight options found.
+    Returns structured text of flight options with airline, times, and price.
     """
     try:
+        import re, urllib.parse
         page = _get_page()
 
-        # Build Google Flights search URL
-        trip_type = "2" if return_date else "3"          # 1=round, 2=round, 3=one-way
-        cabin_map  = {"economy": "1", "premium": "2", "business": "3", "first": "4"}
-        cabin_code = cabin_map.get(cabin.lower(), "1")
-
-        # Simplest reliable URL: use natural language search
         q = f"flights from {origin} to {destination} on {date}"
         if return_date:
             q += f" returning {return_date}"
@@ -904,40 +926,35 @@ def tool_flight_search(origin: str, destination: str, date: str,
             q += f" {passengers} passengers"
         q += f" {cabin} class"
 
-        import urllib.parse
-        search_url = "https://www.google.com/travel/flights?" + urllib.parse.urlencode({"q": q})
-        page.goto(search_url, timeout=_BROWSER_TIMEOUT_MS)
-
-        # Dismiss Google consent / cookie banner if present
+        url = "https://www.google.com/travel/flights?" + urllib.parse.urlencode({"q": q})
+        page.goto(url, timeout=_BROWSER_TIMEOUT_MS)
         _browser_dismiss_consent(page)
 
-        # Wait for results to render
         try:
             page.wait_for_selector("[data-ved]", timeout=15000)
         except Exception:
-            pass  # continue even if selector not found
+            pass
 
-        # Extract page text focused on flight data
         text = page.inner_text("body")
-        # Keep only lines with prices, times, airlines — trim noise
         lines = [l.strip() for l in text.splitlines() if l.strip()]
-        import re
-        flight_pat = re.compile(r"\d{1,2}:\d{2}|\$\d|¥\d|€\d|£\d|\d+ hr|\d+h \d+m|nonstop|stop|direct", re.I)
+
+        flight_pat = re.compile(
+            r"\d{1,2}:\d{2}|\$\d|¥\d|€\d|£\d|\d+h\s*\d*m?|direct|nonstop|\d\s*stop",
+            re.I,
+        )
         hit_idx = {i for i, l in enumerate(lines) if flight_pat.search(l)}
         ctx_idx = set()
         for i in hit_idx:
             for j in range(max(0, i - 1), min(len(lines), i + 2)):
                 ctx_idx.add(j)
         useful = [lines[i] for i in sorted(ctx_idx)]
-        result_text = "\n".join(useful[:80])
-        if not result_text:
-            result_text = "\n".join(lines[:80])
+        result_text = "\n".join(useful[:80]) if useful else "\n".join(lines[:80])
 
         return (
-            f"Flight search: {origin} → {destination} on {date}"
-            + (f" (return {return_date})" if return_date else "")
+            f"Flight search (Google Flights): {origin} → {destination} on {date}"
+            + (f"  return {return_date}" if return_date else "  one-way")
             + f"\nPassengers: {passengers}  Cabin: {cabin}\n"
-            + "─" * 40 + "\n"
+            + "─" * 50 + "\n"
             + result_text[:3000]
         )
     except Exception as e:

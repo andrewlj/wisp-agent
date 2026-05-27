@@ -47,12 +47,13 @@ CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
 BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
 
 # Initialise workspace sandbox, browser timeout, and briefing LLM config
-from tools import init_workspace, init_browser_timeout
+from tools import init_workspace, init_browser_timeout, init_serpapi
 from briefing import init_briefing
 import knowledge as _knowledge
 init_workspace(WORKSPACE, STRICT)
 init_browser_timeout(BROWSER_TO)
 init_briefing(BASE_URL, API_KEY, MODEL, WORKSPACE)
+init_serpapi(_cfg.get("serpapi", {}).get("api_key", ""))
 _knowledge.init_knowledge(WORKSPACE)
 
 _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())

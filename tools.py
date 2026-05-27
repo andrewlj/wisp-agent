@@ -121,6 +121,16 @@ def init_browser_timeout(seconds: int) -> None:
     global _BROWSER_TIMEOUT_MS
     _BROWSER_TIMEOUT_MS = max(1, seconds) * 1000
 
+
+# ── SerpAPI key (set once from config.yaml) ───────────────────────────────────
+
+_SERPAPI_KEY: str = ""
+
+def init_serpapi(api_key: str) -> None:
+    """Set the SerpAPI key used by flight_search and hotel_search."""
+    global _SERPAPI_KEY
+    _SERPAPI_KEY = (api_key or "").strip()
+
 def _get_page():
     global _pw, _browser, _page
     if _page is None:
@@ -910,300 +920,216 @@ def tool_browser_snapshot() -> str:
         return f"error: {e}"
 
 
-# ── Travel search ─────────────────────────────────────────────────────────────
+# ── Travel search (SerpAPI) ───────────────────────────────────────────────────
+#
+# Both flight_search and hotel_search go through SerpAPI, which provides
+# structured-JSON access to Google Flights / Google Hotels.  This replaces
+# the previous Playwright-based scraping (fragile, depends on DOM structure
+# and tfs protobuf format).  Free tier: 100 searches/month shared.
 
-_google_consent_done = False   # True once Google's consent cookie has been set
+_SERPAPI_BASE = "https://serpapi.com/search"
 
 
-def _ensure_google_consent(page) -> None:
-    """Handle Google's GDPR consent banner on google.com *before* navigating to
-    any Google Travel SPA.  Doing consent on the simple homepage prevents the
-    banner from disrupting the Travel SPA's initialisation, which breaks ?q=
-    parameter parsing when consent fires mid-load on a complex SPA page.
-
-    The flag is process-scoped; each new agent.py run starts fresh (new browser,
-    no persistent profile), so consent is re-handled once per session.
-    """
-    global _google_consent_done
-    if _google_consent_done:
-        return
+def _serpapi_call(params: dict, timeout: int = 30) -> dict | str:
+    """Call SerpAPI with the given params. Returns parsed JSON dict or
+    an error string on failure."""
+    if not _SERPAPI_KEY:
+        return ("error: SerpAPI key not configured. Set serpapi.api_key in "
+                "config.yaml. Sign up at https://serpapi.com/users/sign_up")
     try:
-        page.goto("https://www.google.com/?hl=en", timeout=15000)
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=8000)
-        except Exception:
-            pass
-        _browser_dismiss_consent(page)
-        try:
-            page.wait_for_load_state("networkidle", timeout=8000)
-        except Exception:
-            pass
-        _google_consent_done = True
-    except Exception:
-        pass
+        resp = _requests.get(
+            _SERPAPI_BASE,
+            params={**params, "api_key": _SERPAPI_KEY},
+            timeout=timeout,
+        )
+    except _requests.exceptions.Timeout:
+        return f"error: SerpAPI request timed out after {timeout}s"
+    except Exception as e:
+        return f"error: SerpAPI request failed — {e}"
 
-
-def _flights_fill_airport(page, placeholder_zh: str, placeholder_en: str,
-                          value: str) -> bool:
-    """Fill an airport input on Google Flights and pick the first autocomplete suggestion.
-
-    Clicking the field opens a dialog whose input gets keyboard focus.
-    We use page.keyboard.type() (not locator.type) so keystrokes go to the
-    dialog input.  Then ArrowDown+Enter selects the first airport suggestion.
-    Returns True on success.
-    """
-    for ph in [placeholder_zh, placeholder_en]:
-        try:
-            loc = page.get_by_placeholder(ph)
-            if loc.count() == 0:
-                continue
-            loc.first.click(timeout=5000)    # opens dialog, dialog input gets focus
-            page.wait_for_timeout(500)
-            page.keyboard.type(value, delay=70)   # keyboard → focused dialog input
-            page.wait_for_timeout(2000)            # wait for autocomplete suggestions
-            page.keyboard.press("ArrowDown")
-            page.wait_for_timeout(300)
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(800)
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def _flights_patch_tfs_dates(tfs_url: str, dep_date: str,
-                             ret_date: str = "") -> str:
-    """Inject departure (and optional return) dates into a Google Flights tfs URL.
-
-    After form-filling airports, the tfs protobuf contains airport codes but no
-    dates.  This function inserts the date bytes into each flight leg.
-
-    Protobuf structure used by Google Flights (simplified):
-      field 1: trip type
-      field 2: cabin class
-      field 3 (repeated): flight leg
-        sub-field 2 (optional): date string, YYYY-MM-DD, 10 chars
-        sub-field 13: origin airport
-        sub-field 14: destination airport
-
-    The leg tag is 0x1a (field 3, wire type 2).  A length byte follows.
-    Inserting \\x12\\x0a<YYYY-MM-DD> (12 bytes) at the start of each leg
-    content adds the date and updates the length byte.
-    """
-    import base64, re as _re
-
-    m = _re.search(r'[?&]tfs=([^&]+)', tfs_url)
-    if not m:
-        return tfs_url
-    tfs_b64 = m.group(1)
-    padded = tfs_b64 + '=' * (4 - len(tfs_b64) % 4)
     try:
-        raw = bytearray(base64.urlsafe_b64decode(padded))
+        data = resp.json()
     except Exception:
-        return tfs_url
+        return f"error: SerpAPI returned non-JSON (status {resp.status_code}): {resp.text[:200]}"
 
-    dep_bytes  = dep_date.encode('ascii')
-    ret_bytes  = ret_date.encode('ascii') if ret_date else b''
-    DATE_HDR   = 12   # \x12\x0a + 10-byte date
+    if resp.status_code != 200:
+        msg = data.get("error") or resp.text[:200]
+        return f"error: SerpAPI {resp.status_code} — {msg}"
+    if "error" in data:
+        return f"error: SerpAPI — {data['error']}"
+    return data
 
-    # Collect positions of all field-3 legs (tag 0x1a)
-    legs: list[tuple[int, int]] = []   # (tag_pos, len_pos)
-    i = 0
-    while i < len(raw) - 1:
-        if raw[i] == 0x1a:
-            legs.append((i, i + 1))
-            leg_len = raw[i + 1]
-            i += 2 + leg_len
-        else:
-            i += 1
 
-    # Insert dates in reverse order so earlier offsets remain valid
-    dates = [dep_bytes, ret_bytes]
-    for leg_idx, (tag_pos, len_pos) in reversed(list(enumerate(legs))):
-        if leg_idx >= len(dates):
-            break
-        date_b = dates[leg_idx]
-        if not date_b:
-            continue
-        content_start = len_pos + 1
-        # Skip if leg already contains a date (starts with \x12\x0a followed by digit)
-        if raw[content_start] == 0x12 and raw[content_start + 1] == 0x0a and chr(raw[content_start + 2]).isdigit():
-            continue
-        insert = b'\x12\x0a' + date_b
-        raw[content_start:content_start] = insert
-        raw[len_pos] += DATE_HDR    # update leg length byte
+def _fmt_duration(minutes: int) -> str:
+    """120 → '2h 0m'."""
+    if not isinstance(minutes, (int, float)):
+        return ""
+    h, m = divmod(int(minutes), 60)
+    return f"{h}h {m}m" if h else f"{m}m"
 
-    new_tfs = base64.urlsafe_b64encode(bytes(raw)).rstrip(b'=').decode('ascii')
-    return _re.sub(r'([?&]tfs=)[^&]+', rf'\g<1>{new_tfs}', tfs_url)
+
+def _fmt_flight_leg(legs: list[dict]) -> str:
+    """Format a list of flight segments (one itinerary leg) into one line.
+    Returns 'HH:MM XXX → HH:MM YYY · Airline FN123 · 2h 30m'."""
+    if not legs:
+        return ""
+    first, last = legs[0], legs[-1]
+    dep   = first.get("departure_airport", {}) or {}
+    arr   = last.get("arrival_airport", {}) or {}
+    dep_t = (dep.get("time", "") or "").split(" ")[-1][:5]
+    arr_t = (arr.get("time", "") or "").split(" ")[-1][:5]
+    dep_id, arr_id = dep.get("id", "?"), arr.get("id", "?")
+    airlines = " / ".join(dict.fromkeys(s.get("airline", "") for s in legs if s.get("airline")))
+    stops = len(legs) - 1
+    stops_str = "直飞" if stops == 0 else f"经停 {stops} 次"
+    return f"{dep_t} {dep_id} → {arr_t} {arr_id} · {airlines} · {stops_str}"
 
 
 def tool_flight_search(origin: str, destination: str, date: str,
                        return_date: str = "", passengers: int = 1,
                        cabin: str = "economy") -> str:
-    """Search flights on Google Flights via browser form automation.
+    """Search flights via SerpAPI Google Flights.
 
-    Strategy:
-    1. Navigate to Google Flights and fill origin/destination via the form
-       (keyboard.type into the airport dialog that opens on click).
-    2. After airports are selected the URL becomes a tfs= protobuf URL.
-       We patch the date bytes into that protobuf and navigate to the new URL.
-    3. Wait for real flight results (times + prices) and extract them.
+    Returns a clean, formatted list of best flights with airline, times,
+    duration, stops, and price — extracted from structured JSON (not HTML
+    scraping), so the output is reliable and consistent.
 
-    origin / destination: city name or IATA code (e.g. 'Dublin', 'PEK', 'London').
+    origin / destination: IATA code preferred (e.g. 'DUB', 'BCN').
+                          City names also work but IATA is more reliable.
     date / return_date  : YYYY-MM-DD. Omit return_date for one-way.
-    cabin               : economy | business | first
-    Returns structured text of flight options with airline, times, and price.
+    cabin               : economy | premium_economy | business | first
     """
-    try:
-        import re
-        page = _get_page()
+    cabin_map = {"economy": 1, "premium_economy": 2, "business": 3, "first": 4}
+    travel_class = cabin_map.get(cabin.lower(), 1)
+    trip_type = 1 if return_date else 2   # SerpAPI: 1=round-trip, 2=one-way
 
-        # 1. Handle Google consent on the simple homepage first so the Flights SPA
-        #    initialises without the consent banner disrupting anything.
-        _ensure_google_consent(page)
+    params = {
+        "engine":         "google_flights",
+        "departure_id":   origin,
+        "arrival_id":     destination,
+        "outbound_date":  date,
+        "type":           trip_type,
+        "adults":         passengers,
+        "travel_class":   travel_class,
+        "currency":       "GBP",
+        "hl":             "zh-cn",
+        "gl":             "uk",
+    }
+    if return_date:
+        params["return_date"] = return_date
 
-        # 2. Navigate to Google Flights (plain URL, no ?q= which is not processed).
-        page.goto("https://www.google.com/travel/flights", timeout=_BROWSER_TIMEOUT_MS)
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=10000)
-        except Exception:
-            pass
-        page.wait_for_timeout(1500)
+    data = _serpapi_call(params, timeout=45)
+    if isinstance(data, str):           # error string
+        return data
 
-        # 3. Fill origin airport.
-        #    Clicking the field opens a modal dialog; keyboard.type goes to the
-        #    focused dialog input (not the placeholder input on the main page).
-        _flights_fill_airport(page, "从哪里出发？", "Where from?", origin)
+    best  = data.get("best_flights", []) or []
+    other = data.get("other_flights", []) or []
+    all_flights = best + other
 
-        # 4. Fill destination airport.
-        _flights_fill_airport(page, "要去哪儿？", "Where to?", destination)
-        page.wait_for_timeout(500)
+    if not all_flights:
+        return (f"no flights found for {origin} → {destination} on {date}"
+                + (f" returning {return_date}" if return_date else ""))
 
-        # 5. Extract the tfs= URL that now encodes the selected airports,
-        #    patch in the requested dates, then navigate to the patched URL.
-        #    The tfs URL pre-fills the form but does NOT auto-run the search —
-        #    we must click "搜索" after navigation.
-        tfs_url = page.url
-        if "tfs=" in tfs_url:
-            tfs_url = _flights_patch_tfs_dates(tfs_url, date, return_date)
-            page.goto(tfs_url, timeout=_BROWSER_TIMEOUT_MS)
-        else:
-            # Fallback: navigate with a plain search approach
-            import urllib.parse
-            q = f"flights from {origin} to {destination} on {date}"
-            if return_date:
-                q += f" returning {return_date}"
-            page.goto(
-                "https://www.google.com/travel/flights?" + urllib.parse.urlencode({"q": q}),
-                timeout=_BROWSER_TIMEOUT_MS,
-            )
+    lines = [
+        f"Flight search: {origin} → {destination} on {date}"
+        + (f"  return {return_date}" if return_date else "  one-way"),
+        f"Passengers: {passengers}  Cabin: {cabin}  ({len(all_flights)} options)",
+        "─" * 60,
+    ]
 
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=10000)
-        except Exception:
-            pass
-        page.wait_for_timeout(1000)
+    # Show up to 8 best + 7 other
+    show = best[:8] + other[:7]
+    for i, opt in enumerate(show, 1):
+        flights = opt.get("flights", []) or []
+        price   = opt.get("price")
+        total_d = opt.get("total_duration")
+        leg     = _fmt_flight_leg(flights)
+        tag     = "★" if i <= len(best[:8]) else " "
+        price_s = f"£{price}" if price else "—"
+        dur_s   = _fmt_duration(total_d) if total_d else ""
+        lines.append(f"{tag} {price_s:>7}  {dur_s:>7}  {leg}")
 
-        # 6. Click the Search / 搜索 button to actually execute the search.
-        try:
-            search_btn = page.get_by_role("button", name=re.compile(r"搜索|Search", re.I))
-            if search_btn.count() > 0:
-                search_btn.first.click(timeout=5000)
-                page.wait_for_timeout(1000)
-        except Exception:
-            pass
+        # Return leg for round-trips
+        if return_date and len(opt.get("flights", [])) == 0:
+            continue
+        # Some SerpAPI responses split outbound + return into one "flights" array
+        # — we'll show segments together. If there are >2 segments and a stop
+        # between dep and return, we don't try to split them further.
 
-        # 8. Wait for actual flight content (times + prices) to appear.
-        try:
-            page.wait_for_function(
-                """() => {
-                    const t = document.body.innerText;
-                    return /\\d+\\s*h\\s*\\d*\\s*m|\\d{1,2}:\\d{2}/.test(t)
-                        && /[€£$¥]\\s*\\d|\\d\\s*[€£$¥]/.test(t);
-                }""",
-                timeout=25000,
-            )
-        except Exception:
-            pass
-
-        text = page.inner_text("body")
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-
-        flight_pat = re.compile(
-            r"\d{1,2}:\d{2}|\$\d|¥\d|€\d|£\d|\d+h\s*\d*m?|direct|nonstop|\d\s*stop",
-            re.I,
-        )
-        hit_idx = {i for i, l in enumerate(lines) if flight_pat.search(l)}
-        ctx_idx = set()
-        for i in hit_idx:
-            for j in range(max(0, i - 1), min(len(lines), i + 2)):
-                ctx_idx.add(j)
-        useful = [lines[i] for i in sorted(ctx_idx)]
-        result_text = "\n".join(useful[:80]) if useful else "\n".join(lines[:80])
-
-        return (
-            f"Flight search (Google Flights): {origin} → {destination} on {date}"
-            + (f"  return {return_date}" if return_date else "  one-way")
-            + f"\nPassengers: {passengers}  Cabin: {cabin}\n"
-            + "─" * 50 + "\n"
-            + result_text[:3000]
-        )
-    except Exception as e:
-        return f"error: {e}"
+    return "\n".join(lines)
 
 
 def tool_hotel_search(city: str, checkin: str, checkout: str,
                       guests: int = 1, rooms: int = 1) -> str:
-    """Search hotels on Google Hotels via browser automation.
+    """Search hotels via SerpAPI Google Hotels.
 
-    city            : destination city or area (e.g. 'Dublin', '上海').
+    Returns a clean, formatted list of properties with name, rating,
+    review count, hotel class, amenities, and price per night.
+
+    city            : destination city or area (e.g. 'Barcelona', '上海浦东').
     checkin/checkout: YYYY-MM-DD.
-    Returns structured text of hotel options found.
     """
+    params = {
+        "engine":          "google_hotels",
+        "q":               city,
+        "check_in_date":   checkin,
+        "check_out_date":  checkout,
+        "adults":          guests,
+        "currency":        "GBP",
+        "hl":              "zh-cn",
+        "gl":              "uk",
+    }
+    data = _serpapi_call(params, timeout=45)
+    if isinstance(data, str):
+        return data
+
+    props = data.get("properties", []) or []
+    if not props:
+        return (f"no hotels found for '{city}' "
+                f"{checkin} → {checkout}")
+
+    nights = 1
     try:
-        page = _get_page()
-        import urllib.parse, re
+        from datetime import datetime
+        d1 = datetime.strptime(checkin, "%Y-%m-%d")
+        d2 = datetime.strptime(checkout, "%Y-%m-%d")
+        nights = max(1, (d2 - d1).days)
+    except Exception:
+        pass
 
-        q = f"hotels in {city} checkin {checkin} checkout {checkout}"
-        if guests > 1:
-            q += f" {guests} guests"
-        # Ensure Google consent cookie is set before navigating to the Travel SPA.
-        _ensure_google_consent(page)
+    lines = [
+        f"Hotel search: {city}  {checkin} → {checkout}  "
+        f"({nights} night{'s' if nights > 1 else ''}, "
+        f"{guests} guest{'s' if guests > 1 else ''}, "
+        f"{rooms} room{'s' if rooms > 1 else ''})",
+        f"{len(props)} properties found",
+        "─" * 60,
+    ]
 
-        search_url = "https://www.google.com/travel/hotels?" + urllib.parse.urlencode({"q": q})
-        page.goto(search_url, timeout=_BROWSER_TIMEOUT_MS)
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except Exception:
-            pass
+    for p in props[:15]:
+        name   = p.get("name", "—")
+        rating = p.get("overall_rating")
+        revs   = p.get("reviews")
+        klass  = p.get("hotel_class", "")
+        rate   = p.get("rate_per_night", {}) or {}
+        price  = rate.get("lowest") or rate.get("extracted_lowest")
+        total  = (p.get("total_rate") or {}).get("lowest")
+        ams    = p.get("amenities", []) or []
 
-        try:
-            page.wait_for_selector("[data-ved],[data-hveid]", timeout=15000)
-        except Exception:
-            pass
+        rating_s = f"★{rating:.1f}" if isinstance(rating, (int, float)) else "—"
+        revs_s   = f"({revs:,})" if isinstance(revs, int) else (f"({revs})" if revs else "")
+        klass_s  = f" · {klass}" if klass else ""
+        price_s  = f"{price}/晚" if price else "—"
+        total_s  = f" total {total}" if total and total != price else ""
+        ams_s    = " · ".join(ams[:3]) if ams else ""
 
-        text = page.inner_text("body")
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        # Capture lines with prices/ratings AND their neighbours (hotel names)
-        price_pat = re.compile(r"\$\d|¥\d|€\d|£\d|★|☆|\d\.\d|per night|/night|评分|晚|stars?", re.I)
-        hit_idx = {i for i, l in enumerate(lines) if price_pat.search(l)}
-        ctx_idx = set()
-        for i in hit_idx:
-            for j in range(max(0, i - 2), min(len(lines), i + 3)):
-                ctx_idx.add(j)
-        useful = [lines[i] for i in sorted(ctx_idx)]
-        result_text = "\n".join(useful[:80])
-        if not result_text:
-            result_text = "\n".join(lines[:80])
+        lines.append(f"{name}")
+        lines.append(f"  {rating_s} {revs_s}{klass_s}  {price_s}{total_s}")
+        if ams_s:
+            lines.append(f"  {ams_s}")
 
-        return (
-            f"Hotel search: {city}  {checkin} → {checkout}"
-            + f"  guests: {guests}  rooms: {rooms}\n"
-            + "─" * 40 + "\n"
-            + result_text[:3000]
-        )
-    except Exception as e:
-        return f"error: {e}"
+    return "\n".join(lines)
+
 
 
 # ── Reminders & Calendar helpers ─────────────────────────────────────────────

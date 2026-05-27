@@ -329,7 +329,7 @@ SCHEMAS: list[dict] = [
 
     # ── Travel search ──────────────────────────────────────────────────────────
     _fn("flight_search",
-        "Search for flights on Google Flights via browser automation. "
+        "Search for flights via SerpAPI Google Flights (structured JSON API). "
         "Returns airline names, departure/arrival times, duration, stops, and prices. "
         "Covers all major and budget airlines including European low-cost carriers "
         "(Ryanair, easyJet, Wizz Air, etc.). Use city names or IATA codes.",
@@ -343,8 +343,9 @@ SCHEMAS: list[dict] = [
         }, ["origin", "destination", "date"]),
 
     _fn("hotel_search",
-        "Search for hotels on Google Hotels via browser automation. "
-        "Returns hotel names, prices per night, ratings, and locations.",
+        "Search for hotels via SerpAPI Google Hotels (structured JSON API). "
+        "Returns hotel names, prices per night, ratings, review counts, "
+        "hotel class, and amenities.",
         {
             "city":     {"type": "string",  "description": "Destination city or area (e.g. 'Dublin', '上海浦东')"},
             "checkin":  {"type": "string",  "description": "Check-in date YYYY-MM-DD"},
@@ -719,52 +720,6 @@ def tool_http_post(url: str, body: dict, headers: dict | None = None) -> str:
 
 # ── Browser ───────────────────────────────────────────────────────────────────
 
-def _browser_dismiss_consent(page) -> bool:
-    """Auto-dismiss cookie/consent banners and bot-check press-and-hold challenges.
-
-    Returns True if a banner was dismissed (caller should re-navigate to restore
-    the target URL, which consent handlers may have redirected or reloaded away).
-    """
-    # 1. Standard click-to-accept banners
-    candidates = [
-        "全部拒绝", "Reject all", "Reject All",       # Google zh/en
-        "Accept all cookies", "Accept all", "Reject",  # Skyscanner
-        "全部接受", "Accept",                           # fallback
-    ]
-    for label in candidates:
-        try:
-            btn = page.locator(f"button:has-text(\"{label}\")")
-            if btn.count() > 0:
-                btn.first.click(timeout=3000)
-                page.wait_for_load_state("networkidle", timeout=5000)
-                return True
-        except Exception:
-            continue
-
-    # 2. "PRESS & HOLD" bot-check (Skyscanner / DataDome style)
-    try:
-        hold_btn = page.locator(
-            "button:has-text('PRESS & HOLD'), "
-            "[class*='press-and-hold'], [class*='press_hold'], "
-            "[id*='hold'], [data-testid*='hold']"
-        )
-        if hold_btn.count() > 0:
-            box = hold_btn.first.bounding_box()
-            if box:
-                cx = box["x"] + box["width"] / 2
-                cy = box["y"] + box["height"] / 2
-                page.mouse.move(cx, cy)
-                page.mouse.down()
-                page.wait_for_timeout(2500)   # hold 2.5 seconds
-                page.mouse.up()
-                page.wait_for_load_state("networkidle", timeout=8000)
-                return True
-    except Exception:
-        pass
-
-    return False
-
-
 def tool_browser_open(url: str) -> str:
     try:
         page = _get_page()
@@ -922,10 +877,9 @@ def tool_browser_snapshot() -> str:
 
 # ── Travel search (SerpAPI) ───────────────────────────────────────────────────
 #
-# Both flight_search and hotel_search go through SerpAPI, which provides
-# structured-JSON access to Google Flights / Google Hotels.  This replaces
-# the previous Playwright-based scraping (fragile, depends on DOM structure
-# and tfs protobuf format).  Free tier: 100 searches/month shared.
+# flight_search and hotel_search use SerpAPI's structured-JSON access to
+# Google Flights / Google Hotels.  Free tier: 100 searches/month shared.
+# Set serpapi.api_key in config.yaml; sign up at https://serpapi.com.
 
 _SERPAPI_BASE = "https://serpapi.com/search"
 

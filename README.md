@@ -61,6 +61,10 @@ agent:
   strict_workspace: true
   context_limit: 6000       # estimated tokens before compression kicks in
   context_keep_recent: 6    # recent messages kept verbatim during compression
+
+# Optional — only needed for flight_search / hotel_search
+serpapi:
+  api_key: ""               # https://serpapi.com (100 free searches/month)
 ```
 
 **3. Start your local LLM server**

@@ -15,3 +15,9 @@ agent:
   strict_workspace: true            # block writes/deletes outside workspace
   context_limit: 6000               # estimated tokens before compression kicks in
   context_keep_recent: 6            # number of recent messages to keep verbatim
+
+# Optional: SerpAPI key for flight_search and hotel_search tools.
+# Sign up free at https://serpapi.com/users/sign_up (100 searches/month free).
+# Leave empty to disable these tools.
+serpapi:
+  api_key: ""

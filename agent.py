@@ -139,7 +139,8 @@ Always use macOS/BSD command syntax — NOT Linux/GNU:
 - If a command fails, read the error and fix it before retrying.
 - Use `read_file` / `write_file` for file content; `bash` for everything else.
 - Use `osascript` for notifications, app control, dialogs.
-- Use `browser_*` for interactive web tasks (flights, forms, logins) — not `http_get`.
+- Use `browser_*` for interactive web tasks (forms, logins, dynamic SPAs) — not `http_get`.
+- For flights / hotels use the dedicated `flight_search` / `hotel_search` tools, not `browser_*`.
 - Call `done` as soon as the task is fully complete.
 - When the task involves dates or times (today, tomorrow, next week, etc.), ALWAYS run `bash date '+%Y-%m-%d %H:%M %A'` first to get the current time before calculating any date.
 

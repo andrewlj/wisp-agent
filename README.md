@@ -96,7 +96,7 @@ python agent.py "帮我统计桌面上有多少个文件"
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (33 total)
+## Tools (37 total)
 
 | Category | Tools |
 |----------|-------|
@@ -107,6 +107,7 @@ python agent.py "帮我统计桌面上有多少个文件"
 | Browser | `browser_open`, `browser_click`, `browser_type`, `browser_get_text`, `browser_screenshot`, `browser_close` |
 | Reminders | `reminders_list`, `reminders_add` |
 | Calendar | `calendar_list`, `calendar_add` |
+| Notes | `notes_list`, `notes_read`, `notes_create`, `notes_append` |
 | Task | `task_init`, `task_step_done`, `task_step_fail` |
 | News | `daily_briefing` |
 | Learn | `learn` |
@@ -166,6 +167,32 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 ---
 
 ## Development Log
+
+### v0.7 — Reminders, Calendar, Notes & Test Suite
+
+**New tools**
+- `reminders_list(due_before, list_name, limit)` — list incomplete reminders; `due_before` date filter for fast today-only queries across all iCloud lists
+- `reminders_add(title, due, notes, list_name)` — add reminder with optional due date
+- `calendar_list(days, calendar)` — list upcoming events from macOS Calendar
+- `calendar_add(title, start, end, calendar, notes)` — create calendar event
+- `notes_list(folder, limit)` — list notes with title + modification date
+- `notes_read(title, folder)` — read note content by partial title match
+- `notes_create(title, content, folder)` — create note; auto-creates folder
+- `notes_append(title, content)` — append text to existing note
+
+**Date accuracy**
+- Current date injected as first line of system prompt on every `run_agent` call — LLM always sees today's date regardless of session duration
+
+**Automated test suite** (`test/`)
+- `test/test_tools.py` — 47 unit tests, no LLM required, sub-second for most
+- `test/run_tests.py` — 27 integration tests against live agent; `expect_any` field for OR-matching; `post_check` for side-effect verification; per-test `setup`/`teardown`
+
+**Bug fixes**
+- Bash scanner regex: `\s*` between redirect operator and path (real security fix — `> /tmp/file` was not blocked)
+- `reminders_list` default: batch-fetch with `whose completed is false` pre-filter; avoids loading all 400+ completed items from iCloud
+- AppleScript reserved word `line` → renamed to `itemLine`
+- `delete_file` return value normalised to `ok: moved to Trash: {path}`
+- `_profile` type annotation removed (annotated names can't be declared `global` inside functions)
 
 ### v0.6 — Stability, Debug & Config-driven Briefing
 

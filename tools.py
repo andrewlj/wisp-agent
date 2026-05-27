@@ -67,7 +67,7 @@ def _guard_path(path: str, action: str = "write") -> str | None:
 _RISKY = [
     (r"\brm\s+(-\w*[rRfF]\w*\s+|-\w*[rRfF]\w*$|--recursive|--force)", "destructive rm"),
     (r"\bsudo\s+rm\b",   "sudo rm"),
-    (r"\b(mkfs|format)\b", "disk format"),
+    (r"\bmkfs\b|\bformat\s+/dev/", "disk format"),
     (r"\bdd\s+if=",      "dd disk write"),
     (r"\bchmod\s+(777|a\+[wx])", "unsafe chmod"),
     (r"\bsudo\b",        "sudo usage"),

@@ -238,6 +238,13 @@ TESTS: list[UnitTest] = [
         fn=lambda: _assert_allowed(
             _bash_risk(f"rm {WORKSPACE}/file.txt"), "single file rm"),
     ),
+    UnitTest(
+        id="u1.12", module="bash_scanner",
+        name="URL 中的 format= 不误报",
+        fn=lambda: _assert_allowed(
+            _bash_risk('curl -s "https://wttr.in/Beijing?format=%+&lang=zh"'),
+            "curl with format= in URL"),
+    ),
 
     # ── workspace guard ────────────────────────────────────────────────────────
 

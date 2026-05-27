@@ -133,6 +133,7 @@ Always use macOS/BSD command syntax — NOT Linux/GNU:
 - If a security error is returned, report it — do NOT bypass.
 
 ## Tool usage
+- For any actionable task, call the first tool immediately — output NO text before the first tool call.
 - Prefer a single well-formed command over multiple probing attempts.
 - If a command fails, read the error and fix it before retrying.
 - Use `read_file` / `write_file` for file content; `bash` for everything else.
@@ -1073,6 +1074,11 @@ def interactive() -> None:
         # ── regular input → LLM ───────────────────────────────────────────
         else:
             run_agent(user_input, messages, session_id=sid)
+
+    # Restore terminal to a sane state — prompt_toolkit's raw mode may not be
+    # fully cleaned up when we break out of the loop (visible as ^[[A on arrows).
+    import subprocess as _sp
+    _sp.run(["stty", "sane"], stderr=_sp.DEVNULL)
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 

@@ -709,8 +709,12 @@ def tool_http_post(url: str, body: dict, headers: dict | None = None) -> str:
 
 # ── Browser ───────────────────────────────────────────────────────────────────
 
-def _browser_dismiss_consent(page) -> None:
-    """Auto-dismiss cookie/consent banners and bot-check press-and-hold challenges."""
+def _browser_dismiss_consent(page) -> bool:
+    """Auto-dismiss cookie/consent banners and bot-check press-and-hold challenges.
+
+    Returns True if a banner was dismissed (caller should re-navigate to restore
+    the target URL, which consent handlers may have redirected or reloaded away).
+    """
     # 1. Standard click-to-accept banners
     candidates = [
         "全部拒绝", "Reject all", "Reject All",       # Google zh/en
@@ -723,7 +727,7 @@ def _browser_dismiss_consent(page) -> None:
             if btn.count() > 0:
                 btn.first.click(timeout=3000)
                 page.wait_for_load_state("networkidle", timeout=5000)
-                return
+                return True
         except Exception:
             continue
 
@@ -744,8 +748,11 @@ def _browser_dismiss_consent(page) -> None:
                 page.wait_for_timeout(2500)   # hold 2.5 seconds
                 page.mouse.up()
                 page.wait_for_load_state("networkidle", timeout=8000)
+                return True
     except Exception:
         pass
+
+    return False
 
 
 def tool_browser_open(url: str) -> str:
@@ -905,10 +912,142 @@ def tool_browser_snapshot() -> str:
 
 # ── Travel search ─────────────────────────────────────────────────────────────
 
+_google_consent_done = False   # True once Google's consent cookie has been set
+
+
+def _ensure_google_consent(page) -> None:
+    """Handle Google's GDPR consent banner on google.com *before* navigating to
+    any Google Travel SPA.  Doing consent on the simple homepage prevents the
+    banner from disrupting the Travel SPA's initialisation, which breaks ?q=
+    parameter parsing when consent fires mid-load on a complex SPA page.
+
+    The flag is process-scoped; each new agent.py run starts fresh (new browser,
+    no persistent profile), so consent is re-handled once per session.
+    """
+    global _google_consent_done
+    if _google_consent_done:
+        return
+    try:
+        page.goto("https://www.google.com/?hl=en", timeout=15000)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=8000)
+        except Exception:
+            pass
+        _browser_dismiss_consent(page)
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+        _google_consent_done = True
+    except Exception:
+        pass
+
+
+def _flights_fill_airport(page, placeholder_zh: str, placeholder_en: str,
+                          value: str) -> bool:
+    """Fill an airport input on Google Flights and pick the first autocomplete suggestion.
+
+    Clicking the field opens a dialog whose input gets keyboard focus.
+    We use page.keyboard.type() (not locator.type) so keystrokes go to the
+    dialog input.  Then ArrowDown+Enter selects the first airport suggestion.
+    Returns True on success.
+    """
+    for ph in [placeholder_zh, placeholder_en]:
+        try:
+            loc = page.get_by_placeholder(ph)
+            if loc.count() == 0:
+                continue
+            loc.first.click(timeout=5000)    # opens dialog, dialog input gets focus
+            page.wait_for_timeout(500)
+            page.keyboard.type(value, delay=70)   # keyboard → focused dialog input
+            page.wait_for_timeout(2000)            # wait for autocomplete suggestions
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(300)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(800)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _flights_patch_tfs_dates(tfs_url: str, dep_date: str,
+                             ret_date: str = "") -> str:
+    """Inject departure (and optional return) dates into a Google Flights tfs URL.
+
+    After form-filling airports, the tfs protobuf contains airport codes but no
+    dates.  This function inserts the date bytes into each flight leg.
+
+    Protobuf structure used by Google Flights (simplified):
+      field 1: trip type
+      field 2: cabin class
+      field 3 (repeated): flight leg
+        sub-field 2 (optional): date string, YYYY-MM-DD, 10 chars
+        sub-field 13: origin airport
+        sub-field 14: destination airport
+
+    The leg tag is 0x1a (field 3, wire type 2).  A length byte follows.
+    Inserting \\x12\\x0a<YYYY-MM-DD> (12 bytes) at the start of each leg
+    content adds the date and updates the length byte.
+    """
+    import base64, re as _re
+
+    m = _re.search(r'[?&]tfs=([^&]+)', tfs_url)
+    if not m:
+        return tfs_url
+    tfs_b64 = m.group(1)
+    padded = tfs_b64 + '=' * (4 - len(tfs_b64) % 4)
+    try:
+        raw = bytearray(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return tfs_url
+
+    dep_bytes  = dep_date.encode('ascii')
+    ret_bytes  = ret_date.encode('ascii') if ret_date else b''
+    DATE_HDR   = 12   # \x12\x0a + 10-byte date
+
+    # Collect positions of all field-3 legs (tag 0x1a)
+    legs: list[tuple[int, int]] = []   # (tag_pos, len_pos)
+    i = 0
+    while i < len(raw) - 1:
+        if raw[i] == 0x1a:
+            legs.append((i, i + 1))
+            leg_len = raw[i + 1]
+            i += 2 + leg_len
+        else:
+            i += 1
+
+    # Insert dates in reverse order so earlier offsets remain valid
+    dates = [dep_bytes, ret_bytes]
+    for leg_idx, (tag_pos, len_pos) in reversed(list(enumerate(legs))):
+        if leg_idx >= len(dates):
+            break
+        date_b = dates[leg_idx]
+        if not date_b:
+            continue
+        content_start = len_pos + 1
+        # Skip if leg already contains a date (starts with \x12\x0a followed by digit)
+        if raw[content_start] == 0x12 and raw[content_start + 1] == 0x0a and chr(raw[content_start + 2]).isdigit():
+            continue
+        insert = b'\x12\x0a' + date_b
+        raw[content_start:content_start] = insert
+        raw[len_pos] += DATE_HDR    # update leg length byte
+
+    new_tfs = base64.urlsafe_b64encode(bytes(raw)).rstrip(b'=').decode('ascii')
+    return _re.sub(r'([?&]tfs=)[^&]+', rf'\g<1>{new_tfs}', tfs_url)
+
+
 def tool_flight_search(origin: str, destination: str, date: str,
                        return_date: str = "", passengers: int = 1,
                        cabin: str = "economy") -> str:
-    """Search flights on Google Flights via browser automation.
+    """Search flights on Google Flights via browser form automation.
+
+    Strategy:
+    1. Navigate to Google Flights and fill origin/destination via the form
+       (keyboard.type into the airport dialog that opens on click).
+    2. After airports are selected the URL becomes a tfs= protobuf URL.
+       We patch the date bytes into that protobuf and navigate to the new URL.
+    3. Wait for real flight results (times + prices) and extract them.
 
     origin / destination: city name or IATA code (e.g. 'Dublin', 'PEK', 'London').
     date / return_date  : YYYY-MM-DD. Omit return_date for one-way.
@@ -916,22 +1055,74 @@ def tool_flight_search(origin: str, destination: str, date: str,
     Returns structured text of flight options with airline, times, and price.
     """
     try:
-        import re, urllib.parse
+        import re
         page = _get_page()
 
-        q = f"flights from {origin} to {destination} on {date}"
-        if return_date:
-            q += f" returning {return_date}"
-        if passengers > 1:
-            q += f" {passengers} passengers"
-        q += f" {cabin} class"
+        # 1. Handle Google consent on the simple homepage first so the Flights SPA
+        #    initialises without the consent banner disrupting anything.
+        _ensure_google_consent(page)
 
-        url = "https://www.google.com/travel/flights?" + urllib.parse.urlencode({"q": q})
-        page.goto(url, timeout=_BROWSER_TIMEOUT_MS)
-        _browser_dismiss_consent(page)
+        # 2. Navigate to Google Flights (plain URL, no ?q= which is not processed).
+        page.goto("https://www.google.com/travel/flights", timeout=_BROWSER_TIMEOUT_MS)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
+
+        # 3. Fill origin airport.
+        #    Clicking the field opens a modal dialog; keyboard.type goes to the
+        #    focused dialog input (not the placeholder input on the main page).
+        _flights_fill_airport(page, "从哪里出发？", "Where from?", origin)
+
+        # 4. Fill destination airport.
+        _flights_fill_airport(page, "要去哪儿？", "Where to?", destination)
+        page.wait_for_timeout(500)
+
+        # 5. Extract the tfs= URL that now encodes the selected airports,
+        #    patch in the requested dates, then navigate to the patched URL.
+        #    The tfs URL pre-fills the form but does NOT auto-run the search —
+        #    we must click "搜索" after navigation.
+        tfs_url = page.url
+        if "tfs=" in tfs_url:
+            tfs_url = _flights_patch_tfs_dates(tfs_url, date, return_date)
+            page.goto(tfs_url, timeout=_BROWSER_TIMEOUT_MS)
+        else:
+            # Fallback: navigate with a plain search approach
+            import urllib.parse
+            q = f"flights from {origin} to {destination} on {date}"
+            if return_date:
+                q += f" returning {return_date}"
+            page.goto(
+                "https://www.google.com/travel/flights?" + urllib.parse.urlencode({"q": q}),
+                timeout=_BROWSER_TIMEOUT_MS,
+            )
 
         try:
-            page.wait_for_selector("[data-ved]", timeout=15000)
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+
+        # 6. Click the Search / 搜索 button to actually execute the search.
+        try:
+            search_btn = page.get_by_role("button", name=re.compile(r"搜索|Search", re.I))
+            if search_btn.count() > 0:
+                search_btn.first.click(timeout=5000)
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        # 8. Wait for actual flight content (times + prices) to appear.
+        try:
+            page.wait_for_function(
+                """() => {
+                    const t = document.body.innerText;
+                    return /\\d+\\s*h\\s*\\d*\\s*m|\\d{1,2}:\\d{2}/.test(t)
+                        && /[€£$¥]\\s*\\d|\\d\\s*[€£$¥]/.test(t);
+                }""",
+                timeout=25000,
+            )
         except Exception:
             pass
 
@@ -976,11 +1167,15 @@ def tool_hotel_search(city: str, checkin: str, checkout: str,
         q = f"hotels in {city} checkin {checkin} checkout {checkout}"
         if guests > 1:
             q += f" {guests} guests"
+        # Ensure Google consent cookie is set before navigating to the Travel SPA.
+        _ensure_google_consent(page)
+
         search_url = "https://www.google.com/travel/hotels?" + urllib.parse.urlencode({"q": q})
         page.goto(search_url, timeout=_BROWSER_TIMEOUT_MS)
-
-        # Dismiss Google consent / cookie banner if present
-        _browser_dismiss_consent(page)
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
 
         try:
             page.wait_for_selector("[data-ved],[data-hveid]", timeout=15000)

@@ -288,6 +288,60 @@ SCHEMAS: list[dict] = [
     _fn("browser_close", "Close the Playwright browser.",
         {}, []),
 
+    _fn("browser_wait",
+        "Wait for a CSS selector or text to appear on the current browser page. "
+        "Essential after clicking search buttons on dynamic pages. "
+        "Use 'text=Some Text' to wait for visible text content.",
+        {
+            "selector": {"type": "string", "description": "CSS selector or 'text=...' for visible text"},
+            "timeout":  {"type": "integer", "description": "Max seconds to wait. Default 10."},
+        }, ["selector"]),
+
+    _fn("browser_select",
+        "Select an option from a <select> dropdown on the current browser page.",
+        {
+            "selector": {"type": "string", "description": "CSS selector for the <select> element"},
+            "value":    {"type": "string", "description": "Option label text or value to select"},
+        }, ["selector", "value"]),
+
+    _fn("browser_scroll",
+        "Scroll the current browser page.",
+        {
+            "direction": {"type": "string",  "description": "Scroll direction: 'down' (default), 'up', 'left', 'right'"},
+            "amount":    {"type": "integer", "description": "Pixels to scroll. Default 500."},
+        }, []),
+
+    _fn("browser_snapshot",
+        "Return a structured snapshot of the current browser page: title, URL, headings, "
+        "prices, buttons, input fields, and key links. Use this after waiting for results "
+        "to extract flight prices, hotel rates, or other structured data without reading the full page.",
+        {}, []),
+
+    # ── Travel search ──────────────────────────────────────────────────────────
+    _fn("flight_search",
+        "Search for flights on Google Flights via browser automation. "
+        "Returns a structured list of flight options with prices, times, and airlines. "
+        "Use IATA codes (PEK, DUB, LHR) or city names for origin/destination.",
+        {
+            "origin":      {"type": "string",  "description": "Departure city or IATA code (e.g. 'PEK', 'Dublin')"},
+            "destination": {"type": "string",  "description": "Arrival city or IATA code (e.g. 'DUB', 'London')"},
+            "date":        {"type": "string",  "description": "Departure date YYYY-MM-DD"},
+            "return_date": {"type": "string",  "description": "Return date YYYY-MM-DD for round-trip. Omit for one-way."},
+            "passengers":  {"type": "integer", "description": "Number of passengers. Default 1."},
+            "cabin":       {"type": "string",  "description": "Cabin class: economy (default), business, first"},
+        }, ["origin", "destination", "date"]),
+
+    _fn("hotel_search",
+        "Search for hotels on Google Hotels via browser automation. "
+        "Returns hotel names, prices per night, ratings, and locations.",
+        {
+            "city":     {"type": "string",  "description": "Destination city or area (e.g. 'Dublin', '上海浦东')"},
+            "checkin":  {"type": "string",  "description": "Check-in date YYYY-MM-DD"},
+            "checkout": {"type": "string",  "description": "Check-out date YYYY-MM-DD"},
+            "guests":   {"type": "integer", "description": "Number of guests. Default 1."},
+            "rooms":    {"type": "integer", "description": "Number of rooms. Default 1."},
+        }, ["city", "checkin", "checkout"]),
+
     # ── Reminders ─────────────────────────────────────────────────────────────
     _fn("reminders_list",
         "List incomplete reminders from macOS Reminders app.",
@@ -654,6 +708,19 @@ def tool_http_post(url: str, body: dict, headers: dict | None = None) -> str:
 
 # ── Browser ───────────────────────────────────────────────────────────────────
 
+def _browser_dismiss_consent(page) -> None:
+    """Auto-click 'Reject All' / 'Accept All' on Google consent screens."""
+    for label in ["全部拒绝", "Reject all", "Reject All", "全部接受", "Accept all"]:
+        try:
+            btn = page.locator(f"button:has-text(\"{label}\")")
+            if btn.count() > 0:
+                btn.first.click(timeout=3000)
+                page.wait_for_load_state("networkidle", timeout=5000)
+                return
+        except Exception:
+            continue
+
+
 def tool_browser_open(url: str) -> str:
     try:
         page = _get_page()
@@ -702,6 +769,227 @@ def tool_browser_close() -> str:
     try:
         _close_browser()
         return "ok: browser closed"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_browser_wait(selector: str, timeout: int = 10) -> str:
+    """Wait for a CSS selector or visible text to appear on the page.
+
+    Prefix selector with 'text=' to wait for visible text content.
+    Example: 'text=Search Results', '#flight-list', '.price-card'
+    """
+    try:
+        page = _get_page()
+        ms = timeout * 1000
+        if selector.startswith("text="):
+            page.wait_for_selector(f"*:has-text(\"{selector[5:]}\")", timeout=ms)
+        else:
+            page.wait_for_selector(selector, timeout=ms)
+        return f"ok: element '{selector}' appeared"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_browser_select(selector: str, value: str) -> str:
+    """Select an option from a <select> dropdown by value text or option value."""
+    try:
+        page = _get_page()
+        # Try by label first, fall back to value
+        try:
+            page.select_option(selector, label=value, timeout=_BROWSER_TIMEOUT_MS)
+        except Exception:
+            page.select_option(selector, value=value, timeout=_BROWSER_TIMEOUT_MS)
+        return f"ok: selected '{value}' in '{selector}'"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_browser_scroll(direction: str = "down", amount: int = 500) -> str:
+    """Scroll the current page. direction: 'down'|'up'|'left'|'right'."""
+    try:
+        page = _get_page()
+        dx = {"left": -amount, "right": amount}.get(direction, 0)
+        dy = {"down": amount, "up": -amount}.get(direction, 0)
+        page.evaluate(f"window.scrollBy({dx}, {dy})")
+        return f"ok: scrolled {direction} {amount}px"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_browser_snapshot() -> str:
+    """Return a structured snapshot of the current page.
+
+    Extracts: page title, URL, headings, price-like numbers, links, buttons,
+    and visible input fields — useful for parsing travel search results.
+    """
+    try:
+        page = _get_page()
+        data = page.evaluate("""() => {
+            const prices = [];
+            const seen = new Set();
+            // Price-like patterns: numbers with currency symbols or decimals
+            document.querySelectorAll('*').forEach(el => {
+                if (el.children.length === 0) {
+                    const t = el.innerText || '';
+                    if (/[¥$€£￥]\\s?\\d|\\d+\\.\\d{2}|\\d{1,3}(,\\d{3})+/.test(t) && t.length < 30) {
+                        const key = t.trim();
+                        if (key && !seen.has(key)) { seen.add(key); prices.push(key); }
+                    }
+                }
+            });
+            const headings = Array.from(document.querySelectorAll('h1,h2,h3'))
+                .map(h => h.innerText.trim()).filter(t => t).slice(0, 10);
+            const links = Array.from(document.querySelectorAll('a[href]'))
+                .map(a => ({text: a.innerText.trim().slice(0, 60), href: a.href}))
+                .filter(l => l.text).slice(0, 20);
+            const buttons = Array.from(document.querySelectorAll('button,[role=button]'))
+                .map(b => b.innerText.trim()).filter(t => t).slice(0, 15);
+            const inputs = Array.from(document.querySelectorAll('input,select,textarea'))
+                .map(i => ({tag: i.tagName, name: i.name||i.id||i.placeholder||'', type: i.type||''}))
+                .filter(i => i.name).slice(0, 15);
+            return {
+                title: document.title,
+                url: location.href,
+                headings, prices: prices.slice(0, 30), links, buttons, inputs
+            };
+        }""")
+        import json
+        out = [
+            f"title: {data['title']}",
+            f"url:   {data['url']}",
+        ]
+        if data["headings"]:
+            out.append("headings: " + " | ".join(data["headings"]))
+        if data["prices"]:
+            out.append("prices: " + "  ".join(data["prices"]))
+        if data["buttons"]:
+            out.append("buttons: " + " | ".join(data["buttons"]))
+        if data["inputs"]:
+            out.append("inputs: " + "  ".join(f"{i['tag']}[{i['name']}]" for i in data["inputs"]))
+        if data["links"]:
+            out.append("links:")
+            for l in data["links"]:
+                out.append(f"  {l['text']}  →  {l['href']}")
+        return "\n".join(out)
+    except Exception as e:
+        return f"error: {e}"
+
+
+# ── Travel search ─────────────────────────────────────────────────────────────
+
+def tool_flight_search(origin: str, destination: str, date: str,
+                       return_date: str = "", passengers: int = 1,
+                       cabin: str = "economy") -> str:
+    """Search flights on Google Flights via browser automation.
+
+    origin / destination: IATA airport code or city name (e.g. 'PEK', 'Dublin').
+    date / return_date  : YYYY-MM-DD. Omit return_date for one-way.
+    cabin               : economy | business | first
+    Returns structured text of flight options found.
+    """
+    try:
+        page = _get_page()
+
+        # Build Google Flights search URL
+        trip_type = "2" if return_date else "3"          # 1=round, 2=round, 3=one-way
+        cabin_map  = {"economy": "1", "premium": "2", "business": "3", "first": "4"}
+        cabin_code = cabin_map.get(cabin.lower(), "1")
+
+        # Simplest reliable URL: use natural language search
+        q = f"flights from {origin} to {destination} on {date}"
+        if return_date:
+            q += f" returning {return_date}"
+        if passengers > 1:
+            q += f" {passengers} passengers"
+        q += f" {cabin} class"
+
+        import urllib.parse
+        search_url = "https://www.google.com/travel/flights?" + urllib.parse.urlencode({"q": q})
+        page.goto(search_url, timeout=_BROWSER_TIMEOUT_MS)
+
+        # Dismiss Google consent / cookie banner if present
+        _browser_dismiss_consent(page)
+
+        # Wait for results to render
+        try:
+            page.wait_for_selector("[data-ved]", timeout=15000)
+        except Exception:
+            pass  # continue even if selector not found
+
+        # Extract page text focused on flight data
+        text = page.inner_text("body")
+        # Keep only lines with prices, times, airlines — trim noise
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        import re
+        flight_pat = re.compile(r"\d{1,2}:\d{2}|\$\d|¥\d|€\d|£\d|\d+ hr|\d+h \d+m|nonstop|stop|direct", re.I)
+        hit_idx = {i for i, l in enumerate(lines) if flight_pat.search(l)}
+        ctx_idx = set()
+        for i in hit_idx:
+            for j in range(max(0, i - 1), min(len(lines), i + 2)):
+                ctx_idx.add(j)
+        useful = [lines[i] for i in sorted(ctx_idx)]
+        result_text = "\n".join(useful[:80])
+        if not result_text:
+            result_text = "\n".join(lines[:80])
+
+        return (
+            f"Flight search: {origin} → {destination} on {date}"
+            + (f" (return {return_date})" if return_date else "")
+            + f"\nPassengers: {passengers}  Cabin: {cabin}\n"
+            + "─" * 40 + "\n"
+            + result_text[:3000]
+        )
+    except Exception as e:
+        return f"error: {e}"
+
+
+def tool_hotel_search(city: str, checkin: str, checkout: str,
+                      guests: int = 1, rooms: int = 1) -> str:
+    """Search hotels on Google Hotels via browser automation.
+
+    city            : destination city or area (e.g. 'Dublin', '上海').
+    checkin/checkout: YYYY-MM-DD.
+    Returns structured text of hotel options found.
+    """
+    try:
+        page = _get_page()
+        import urllib.parse, re
+
+        q = f"hotels in {city} checkin {checkin} checkout {checkout}"
+        if guests > 1:
+            q += f" {guests} guests"
+        search_url = "https://www.google.com/travel/hotels?" + urllib.parse.urlencode({"q": q})
+        page.goto(search_url, timeout=_BROWSER_TIMEOUT_MS)
+
+        # Dismiss Google consent / cookie banner if present
+        _browser_dismiss_consent(page)
+
+        try:
+            page.wait_for_selector("[data-ved],[data-hveid]", timeout=15000)
+        except Exception:
+            pass
+
+        text = page.inner_text("body")
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        # Capture lines with prices/ratings AND their neighbours (hotel names)
+        price_pat = re.compile(r"\$\d|¥\d|€\d|£\d|★|☆|\d\.\d|per night|/night|评分|晚|stars?", re.I)
+        hit_idx = {i for i, l in enumerate(lines) if price_pat.search(l)}
+        ctx_idx = set()
+        for i in hit_idx:
+            for j in range(max(0, i - 2), min(len(lines), i + 3)):
+                ctx_idx.add(j)
+        useful = [lines[i] for i in sorted(ctx_idx)]
+        result_text = "\n".join(useful[:80])
+        if not result_text:
+            result_text = "\n".join(lines[:80])
+
+        return (
+            f"Hotel search: {city}  {checkin} → {checkout}"
+            + f"  guests: {guests}  rooms: {rooms}\n"
+            + "─" * 40 + "\n"
+            + result_text[:3000]
+        )
     except Exception as e:
         return f"error: {e}"
 
@@ -1249,6 +1537,13 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "browser_get_text":   return tool_browser_get_text(args.get("selector", ""))
         case "browser_screenshot": return tool_browser_screenshot(args.get("save_path", ""))
         case "browser_close":      return tool_browser_close()
+        case "browser_wait":       return tool_browser_wait(args["selector"], args.get("timeout", 10))
+        case "browser_select":     return tool_browser_select(args["selector"], args["value"])
+        case "browser_scroll":     return tool_browser_scroll(args.get("direction", "down"), args.get("amount", 500))
+        case "browser_snapshot":   return tool_browser_snapshot()
+        # Travel
+        case "flight_search":      return tool_flight_search(args["origin"], args["destination"], args["date"], args.get("return_date", ""), args.get("passengers", 1), args.get("cabin", "economy"))
+        case "hotel_search":       return tool_hotel_search(args["city"], args["checkin"], args["checkout"], args.get("guests", 1), args.get("rooms", 1))
         # Task checkpoint
         case "task_init":        return tool_task_init(args["title"], args["steps"])
         case "task_step_done":   return tool_task_step_done(args["task_id"], args["step_id"], args.get("note", ""))

@@ -143,6 +143,7 @@ Always use macOS/BSD command syntax — NOT Linux/GNU:
 - For flights / hotels use the dedicated `flight_search` / `hotel_search` tools, not `browser_*`.
 - Call `done` as soon as the task is fully complete.
 - When the task involves dates or times (today, tomorrow, next week, etc.), ALWAYS run `bash date '+%Y-%m-%d %H:%M %A'` first to get the current time before calculating any date.
+- On macOS, date arithmetic flags MUST come before the format string. Correct: `date -v+1d '+%Y-%m-%d'` (tomorrow), `date -v+3d '+%Y-%m-%d'` (3 days from now). WRONG: `date '+%Y-%m-%d' -v+1d` — the format must be last.
 
 ## Task tracking
 - For any task with 3 or more steps, ALWAYS call `task_init` first.

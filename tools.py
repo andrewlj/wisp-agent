@@ -332,10 +332,12 @@ SCHEMAS: list[dict] = [
         "Search for flights via SerpAPI Google Flights (structured JSON API). "
         "Returns airline names, departure/arrival times, duration, stops, and prices. "
         "Covers all major and budget airlines including European low-cost carriers "
-        "(Ryanair, easyJet, Wizz Air, etc.). Use city names or IATA codes.",
+        "(Ryanair, easyJet, Wizz Air, etc.). The tool resolves city names to airport "
+        "codes internally — you can pass any of: city name (Paris / 巴黎), city code "
+        "(PAR / NYC / LON), or specific airport code (CDG / JFK / LHR).",
         {
-            "origin":      {"type": "string",  "description": "Departure city or IATA code (e.g. 'PEK', 'Dublin')"},
-            "destination": {"type": "string",  "description": "Arrival city or IATA code (e.g. 'DUB', 'London')"},
+            "origin":      {"type": "string",  "description": "Departure: city name ('Paris', '巴黎'), city code ('PAR'), or airport code ('CDG'). All resolve to the primary airport."},
+            "destination": {"type": "string",  "description": "Arrival: city name ('London', '伦敦'), city code ('LON'), or airport code ('LHR'). All resolve to the primary airport."},
             "date":        {"type": "string",  "description": "Departure date YYYY-MM-DD"},
             "return_date": {"type": "string",  "description": "Return date YYYY-MM-DD for round-trip. Omit for one-way."},
             "passengers":  {"type": "integer", "description": "Number of passengers. Default 1."},
@@ -884,6 +886,134 @@ def tool_browser_snapshot() -> str:
 _SERPAPI_BASE = "https://serpapi.com/search"
 
 
+# ── City/airport resolution ──────────────────────────────────────────────────
+#
+# SerpAPI's google_flights engine requires a 3-letter uppercase IATA AIRPORT
+# code for departure_id / arrival_id.  City names ("Dublin") get rejected with
+# a 400; multi-airport city codes ("PAR") return empty results.
+#
+# The LLM cannot reliably know every IATA code, so the tool resolves common
+# city names and city codes to a primary airport code here.  This makes the
+# tool work the same way regardless of which model is driving it.
+
+_CITY_TO_AIRPORT: dict[str, str] = {
+    # English city names → primary airport IATA code
+    "dublin": "DUB",        "london": "LHR",         "paris": "CDG",
+    "amsterdam": "AMS",     "frankfurt": "FRA",      "munich": "MUC",
+    "berlin": "BER",        "zurich": "ZRH",         "vienna": "VIE",
+    "rome": "FCO",          "milan": "MXP",          "venice": "VCE",
+    "madrid": "MAD",        "barcelona": "BCN",      "lisbon": "LIS",
+    "brussels": "BRU",      "copenhagen": "CPH",     "stockholm": "ARN",
+    "oslo": "OSL",          "helsinki": "HEL",       "warsaw": "WAW",
+    "prague": "PRG",        "budapest": "BUD",       "athens": "ATH",
+    "istanbul": "IST",      "moscow": "SVO",
+    "new york": "JFK",      "newyork": "JFK",        "washington": "IAD",
+    "boston": "BOS",        "miami": "MIA",          "chicago": "ORD",
+    "atlanta": "ATL",       "dallas": "DFW",         "houston": "IAH",
+    "denver": "DEN",        "phoenix": "PHX",        "seattle": "SEA",
+    "san francisco": "SFO", "sanfrancisco": "SFO",
+    "los angeles": "LAX",   "losangeles": "LAX",     "las vegas": "LAS",
+    "toronto": "YYZ",       "vancouver": "YVR",      "montreal": "YUL",
+    "mexico city": "MEX",   "sao paulo": "GRU",      "rio de janeiro": "GIG",
+    "buenos aires": "EZE",  "lima": "LIM",           "santiago": "SCL",
+    "tokyo": "HND",         "osaka": "KIX",          "seoul": "ICN",
+    "beijing": "PEK",       "shanghai": "PVG",       "guangzhou": "CAN",
+    "shenzhen": "SZX",      "chengdu": "CTU",        "hong kong": "HKG",
+    "hongkong": "HKG",      "taipei": "TPE",
+    "singapore": "SIN",     "bangkok": "BKK",        "kuala lumpur": "KUL",
+    "jakarta": "CGK",       "manila": "MNL",         "ho chi minh": "SGN",
+    "hanoi": "HAN",         "delhi": "DEL",          "mumbai": "BOM",
+    "bangalore": "BLR",     "dubai": "DXB",          "doha": "DOH",
+    "abu dhabi": "AUH",     "tel aviv": "TLV",       "cairo": "CAI",
+    "johannesburg": "JNB",  "cape town": "CPT",      "nairobi": "NBO",
+    "sydney": "SYD",        "melbourne": "MEL",      "auckland": "AKL",
+
+    # Chinese names
+    "都柏林": "DUB",          "伦敦": "LHR",            "巴黎": "CDG",
+    "阿姆斯特丹": "AMS",       "法兰克福": "FRA",         "慕尼黑": "MUC",
+    "柏林": "BER",            "苏黎世": "ZRH",          "维也纳": "VIE",
+    "罗马": "FCO",            "米兰": "MXP",            "威尼斯": "VCE",
+    "马德里": "MAD",          "巴塞罗那": "BCN",         "里斯本": "LIS",
+    "布鲁塞尔": "BRU",         "哥本哈根": "CPH",         "斯德哥尔摩": "ARN",
+    "奥斯陆": "OSL",          "赫尔辛基": "HEL",         "华沙": "WAW",
+    "布拉格": "PRG",          "布达佩斯": "BUD",         "雅典": "ATH",
+    "伊斯坦布尔": "IST",       "莫斯科": "SVO",
+    "纽约": "JFK",            "华盛顿": "IAD",          "波士顿": "BOS",
+    "迈阿密": "MIA",          "芝加哥": "ORD",          "亚特兰大": "ATL",
+    "达拉斯": "DFW",          "休斯顿": "IAH",          "丹佛": "DEN",
+    "凤凰城": "PHX",          "西雅图": "SEA",          "旧金山": "SFO",
+    "洛杉矶": "LAX",          "拉斯维加斯": "LAS",       "多伦多": "YYZ",
+    "温哥华": "YVR",          "蒙特利尔": "YUL",         "墨西哥城": "MEX",
+    "圣保罗": "GRU",          "里约热内卢": "GIG",       "布宜诺斯艾利斯": "EZE",
+    "东京": "HND",            "大阪": "KIX",            "首尔": "ICN",
+    "北京": "PEK",            "上海": "PVG",            "广州": "CAN",
+    "深圳": "SZX",            "成都": "CTU",            "香港": "HKG",
+    "台北": "TPE",            "新加坡": "SIN",          "曼谷": "BKK",
+    "吉隆坡": "KUL",          "雅加达": "CGK",          "马尼拉": "MNL",
+    "胡志明市": "SGN",         "河内": "HAN",            "新德里": "DEL",
+    "孟买": "BOM",            "班加罗尔": "BLR",         "迪拜": "DXB",
+    "多哈": "DOH",            "阿布扎比": "AUH",         "特拉维夫": "TLV",
+    "开罗": "CAI",            "约翰内斯堡": "JNB",       "开普敦": "CPT",
+    "内罗毕": "NBO",          "悉尼": "SYD",            "墨尔本": "MEL",
+    "奥克兰": "AKL",
+}
+
+# IATA city codes (cover multiple airports) → primary airport for SerpAPI
+_CITY_CODE_TO_AIRPORT: dict[str, str] = {
+    "PAR": "CDG",   # Paris: CDG/ORY/BVA
+    "NYC": "JFK",   # New York: JFK/LGA/EWR
+    "LON": "LHR",   # London: LHR/LGW/STN/LTN/LCY
+    "TYO": "HND",   # Tokyo: HND/NRT
+    "BJS": "PEK",   # Beijing: PEK/PKX
+    "SHA": "PVG",   # Shanghai: PVG/SHA
+    "OSA": "KIX",   # Osaka: KIX/ITM
+    "SEL": "ICN",   # Seoul: ICN/GMP
+    "MIL": "MXP",   # Milan: MXP/LIN
+    "STO": "ARN",   # Stockholm: ARN/BMA
+    "MOW": "SVO",   # Moscow: SVO/DME/VKO
+    "BUE": "EZE",   # Buenos Aires: EZE/AEP
+    "RIO": "GIG",   # Rio: GIG/SDU
+    "SAO": "GRU",   # São Paulo: GRU/CGH
+    "WAS": "IAD",   # Washington: IAD/DCA/BWI
+    "CHI": "ORD",   # Chicago: ORD/MDW
+}
+
+
+def _resolve_airport(value: str) -> str:
+    """Resolve a city name or IATA city code to a specific airport IATA code.
+
+    Accepts:
+      - Airport IATA code (e.g. 'DUB', 'CDG')        → passed through
+      - IATA city code  (e.g. 'PAR', 'NYC', 'LON')   → primary airport
+      - English city name (e.g. 'Paris', 'New York') → primary airport
+      - Chinese city name (e.g. '巴黎', '纽约')        → primary airport
+
+    Returns the original value uppercased if no match (so the caller can
+    still try it and let SerpAPI report a clean error).
+    """
+    if not value:
+        return value
+    v = value.strip()
+
+    # Already a 3-letter all-letter code?  Check city-code mapping first,
+    # otherwise assume it's a valid airport code and pass through.
+    if len(v) == 3 and v.isalpha():
+        up = v.upper()
+        return _CITY_CODE_TO_AIRPORT.get(up, up)
+
+    # City name lookup (case-insensitive, normalises whitespace)
+    key = v.lower().strip()
+    if key in _CITY_TO_AIRPORT:
+        return _CITY_TO_AIRPORT[key]
+    # Also try without spaces ("new york" → "newyork" already in table)
+    key_nospace = key.replace(" ", "")
+    if key_nospace in _CITY_TO_AIRPORT:
+        return _CITY_TO_AIRPORT[key_nospace]
+
+    # No match — return as-is so SerpAPI gives a meaningful error
+    return v
+
+
 def _serpapi_call(params: dict, timeout: int = 30) -> dict | str:
     """Call SerpAPI with the given params. Returns parsed JSON dict or
     an error string on failure."""
@@ -945,11 +1075,15 @@ def tool_flight_search(origin: str, destination: str, date: str,
     """Search flights via SerpAPI Google Flights.
 
     Returns a clean, formatted list of best flights with airline, times,
-    duration, stops, and price — extracted from structured JSON (not HTML
-    scraping), so the output is reliable and consistent.
+    duration, stops, and price — extracted from structured JSON.
 
-    origin / destination: IATA code preferred (e.g. 'DUB', 'BCN').
-                          City names also work but IATA is more reliable.
+    origin / destination: Accepts any of:
+                          - IATA airport code   ('DUB', 'CDG')
+                          - IATA city code      ('PAR', 'NYC', 'LON')
+                          - English city name   ('Paris', 'New York')
+                          - Chinese city name   ('巴黎', '纽约')
+                          The tool resolves city names to the primary airport
+                          internally, so callers do not need to know IATA codes.
     date / return_date  : YYYY-MM-DD. Omit return_date for one-way.
     cabin               : economy | premium_economy | business | first
     """
@@ -957,10 +1091,16 @@ def tool_flight_search(origin: str, destination: str, date: str,
     travel_class = cabin_map.get(cabin.lower(), 1)
     trip_type = 1 if return_date else 2   # SerpAPI: 1=round-trip, 2=one-way
 
+    # Normalise origin/destination to a 3-letter airport IATA code.  Without
+    # this, SerpAPI rejects city names with HTTP 400 and returns empty results
+    # for multi-airport city codes (PAR / NYC / LON / etc).
+    origin_iata = _resolve_airport(origin)
+    dest_iata   = _resolve_airport(destination)
+
     params = {
         "engine":         "google_flights",
-        "departure_id":   origin,
-        "arrival_id":     destination,
+        "departure_id":   origin_iata,
+        "arrival_id":     dest_iata,
         "outbound_date":  date,
         "type":           trip_type,
         "adults":         passengers,
@@ -985,7 +1125,11 @@ def tool_flight_search(origin: str, destination: str, date: str,
                 + (f" returning {return_date}" if return_date else ""))
 
     lines = [
-        f"Flight search: {origin} → {destination} on {date}"
+        f"Flight search: {origin_iata} → {dest_iata} on {date}"
+        + (f"  (origin '{origin}' resolved to {origin_iata})"
+           if origin_iata != origin.upper() else "")
+        + (f"  (destination '{destination}' resolved to {dest_iata})"
+           if dest_iata != destination.upper() else "")
         + (f"  return {return_date}" if return_date else "  one-way"),
         f"Passengers: {passengers}  Cabin: {cabin}  ({len(all_flights)} options)",
         "─" * 60,

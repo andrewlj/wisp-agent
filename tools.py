@@ -28,6 +28,7 @@ def init_workspace(workspace: str, strict: bool = True) -> None:
     _WORKSPACE.mkdir(parents=True, exist_ok=True)
     (workspace_path("screenshots")).mkdir(exist_ok=True)
     _STRICT = strict
+    _kgmid_cache_init(_WORKSPACE)
 
 def workspace_path(name: str = "") -> Path:
     """Return a path inside the workspace, creating it if needed."""
@@ -332,12 +333,12 @@ SCHEMAS: list[dict] = [
         "Search for flights via SerpAPI Google Flights (structured JSON API). "
         "Returns airline names, departure/arrival times, duration, stops, and prices. "
         "Covers all major and budget airlines including European low-cost carriers "
-        "(Ryanair, easyJet, Wizz Air, etc.). The tool resolves city names to airport "
-        "codes internally — you can pass any of: city name (Paris / 巴黎), city code "
-        "(PAR / NYC / LON), or specific airport code (CDG / JFK / LHR).",
+        "(Ryanair, easyJet, Wizz Air, etc.). City names are resolved automatically "
+        "via Google's Knowledge Graph and a single search covers ALL airports for "
+        "multi-airport cities (Paris → CDG+ORY+BVA, London → LHR+LGW+STN+LTN, etc).",
         {
-            "origin":      {"type": "string",  "description": "Departure: city name ('Paris', '巴黎'), city code ('PAR'), or airport code ('CDG'). All resolve to the primary airport."},
-            "destination": {"type": "string",  "description": "Arrival: city name ('London', '伦敦'), city code ('LON'), or airport code ('LHR'). All resolve to the primary airport."},
+            "origin":      {"type": "string",  "description": "Departure: city name in any language ('Paris', '巴黎', '都柏林'), city code ('PAR'), or specific airport code ('CDG'). City names cover all of that city's airports."},
+            "destination": {"type": "string",  "description": "Arrival: city name in any language ('London', '伦敦'), city code ('LON'), or specific airport code ('LHR'). City names cover all of that city's airports."},
             "date":        {"type": "string",  "description": "Departure date YYYY-MM-DD"},
             "return_date": {"type": "string",  "description": "Return date YYYY-MM-DD for round-trip. Omit for one-way."},
             "passengers":  {"type": "integer", "description": "Number of passengers. Default 1."},
@@ -886,131 +887,148 @@ def tool_browser_snapshot() -> str:
 _SERPAPI_BASE = "https://serpapi.com/search"
 
 
-# ── City/airport resolution ──────────────────────────────────────────────────
+# ── City/airport resolution via Google Knowledge Graph ───────────────────────
 #
-# SerpAPI's google_flights engine requires a 3-letter uppercase IATA AIRPORT
-# code for departure_id / arrival_id.  City names ("Dublin") get rejected with
-# a 400; multi-airport city codes ("PAR") return empty results.
+# SerpAPI's google_flights engine accepts EITHER a 3-letter airport IATA code
+# OR a Google Knowledge Graph MID like '/m/05qtj' (Paris).  A KGMID resolves
+# to the CITY, so SerpAPI returns flights to ALL of that city's airports in
+# one call — Paris KGMID covers CDG + ORY + BVA together.
 #
-# The LLM cannot reliably know every IATA code, so the tool resolves common
-# city names and city codes to a primary airport code here.  This makes the
-# tool work the same way regardless of which model is driving it.
+# Strategy:
+#   1. 3-letter IATA codes → pass through (airport-level precision)
+#   2. Any other input (city name in any language) → look up KGMID via
+#      SerpAPI's google search engine, cache result locally, reuse forever
+#   3. Bundle a starter cache of ~25 globally-busy multi-airport cities so
+#      most queries hit cache on first use
+#
+# This avoids enumerating airports and scales to every city on Earth.
 
-_CITY_TO_AIRPORT: dict[str, str] = {
-    # English city names → primary airport IATA code
-    "dublin": "DUB",        "london": "LHR",         "paris": "CDG",
-    "amsterdam": "AMS",     "frankfurt": "FRA",      "munich": "MUC",
-    "berlin": "BER",        "zurich": "ZRH",         "vienna": "VIE",
-    "rome": "FCO",          "milan": "MXP",          "venice": "VCE",
-    "madrid": "MAD",        "barcelona": "BCN",      "lisbon": "LIS",
-    "brussels": "BRU",      "copenhagen": "CPH",     "stockholm": "ARN",
-    "oslo": "OSL",          "helsinki": "HEL",       "warsaw": "WAW",
-    "prague": "PRG",        "budapest": "BUD",       "athens": "ATH",
-    "istanbul": "IST",      "moscow": "SVO",
-    "new york": "JFK",      "newyork": "JFK",        "washington": "IAD",
-    "boston": "BOS",        "miami": "MIA",          "chicago": "ORD",
-    "atlanta": "ATL",       "dallas": "DFW",         "houston": "IAH",
-    "denver": "DEN",        "phoenix": "PHX",        "seattle": "SEA",
-    "san francisco": "SFO", "sanfrancisco": "SFO",
-    "los angeles": "LAX",   "losangeles": "LAX",     "las vegas": "LAS",
-    "toronto": "YYZ",       "vancouver": "YVR",      "montreal": "YUL",
-    "mexico city": "MEX",   "sao paulo": "GRU",      "rio de janeiro": "GIG",
-    "buenos aires": "EZE",  "lima": "LIM",           "santiago": "SCL",
-    "tokyo": "HND",         "osaka": "KIX",          "seoul": "ICN",
-    "beijing": "PEK",       "shanghai": "PVG",       "guangzhou": "CAN",
-    "shenzhen": "SZX",      "chengdu": "CTU",        "hong kong": "HKG",
-    "hongkong": "HKG",      "taipei": "TPE",
-    "singapore": "SIN",     "bangkok": "BKK",        "kuala lumpur": "KUL",
-    "jakarta": "CGK",       "manila": "MNL",         "ho chi minh": "SGN",
-    "hanoi": "HAN",         "delhi": "DEL",          "mumbai": "BOM",
-    "bangalore": "BLR",     "dubai": "DXB",          "doha": "DOH",
-    "abu dhabi": "AUH",     "tel aviv": "TLV",       "cairo": "CAI",
-    "johannesburg": "JNB",  "cape town": "CPT",      "nairobi": "NBO",
-    "sydney": "SYD",        "melbourne": "MEL",      "auckland": "AKL",
+import json as _json
 
-    # Chinese names
-    "都柏林": "DUB",          "伦敦": "LHR",            "巴黎": "CDG",
-    "阿姆斯特丹": "AMS",       "法兰克福": "FRA",         "慕尼黑": "MUC",
-    "柏林": "BER",            "苏黎世": "ZRH",          "维也纳": "VIE",
-    "罗马": "FCO",            "米兰": "MXP",            "威尼斯": "VCE",
-    "马德里": "MAD",          "巴塞罗那": "BCN",         "里斯本": "LIS",
-    "布鲁塞尔": "BRU",         "哥本哈根": "CPH",         "斯德哥尔摩": "ARN",
-    "奥斯陆": "OSL",          "赫尔辛基": "HEL",         "华沙": "WAW",
-    "布拉格": "PRG",          "布达佩斯": "BUD",         "雅典": "ATH",
-    "伊斯坦布尔": "IST",       "莫斯科": "SVO",
-    "纽约": "JFK",            "华盛顿": "IAD",          "波士顿": "BOS",
-    "迈阿密": "MIA",          "芝加哥": "ORD",          "亚特兰大": "ATL",
-    "达拉斯": "DFW",          "休斯顿": "IAH",          "丹佛": "DEN",
-    "凤凰城": "PHX",          "西雅图": "SEA",          "旧金山": "SFO",
-    "洛杉矶": "LAX",          "拉斯维加斯": "LAS",       "多伦多": "YYZ",
-    "温哥华": "YVR",          "蒙特利尔": "YUL",         "墨西哥城": "MEX",
-    "圣保罗": "GRU",          "里约热内卢": "GIG",       "布宜诺斯艾利斯": "EZE",
-    "东京": "HND",            "大阪": "KIX",            "首尔": "ICN",
-    "北京": "PEK",            "上海": "PVG",            "广州": "CAN",
-    "深圳": "SZX",            "成都": "CTU",            "香港": "HKG",
-    "台北": "TPE",            "新加坡": "SIN",          "曼谷": "BKK",
-    "吉隆坡": "KUL",          "雅加达": "CGK",          "马尼拉": "MNL",
-    "胡志明市": "SGN",         "河内": "HAN",            "新德里": "DEL",
-    "孟买": "BOM",            "班加罗尔": "BLR",         "迪拜": "DXB",
-    "多哈": "DOH",            "阿布扎比": "AUH",         "特拉维夫": "TLV",
-    "开罗": "CAI",            "约翰内斯堡": "JNB",       "开普敦": "CPT",
-    "内罗毕": "NBO",          "悉尼": "SYD",            "墨尔本": "MEL",
-    "奥克兰": "AKL",
+_KGMID_CACHE_PATH: Path | None = None
+_KGMID_CACHE: dict[str, str] = {}
+
+# Bundled starter cache: verified via SerpAPI google search. KGMIDs are
+# Google internal IDs that are extremely stable over time.
+_KGMID_STARTER: dict[str, str] = {
+    # Major multi-airport metropolitan areas (English + Chinese + IATA city code)
+    "paris": "/m/05qtj",          "巴黎": "/m/05qtj",          "par": "/m/05qtj",
+    "london": "/m/04jpl",         "伦敦": "/m/04jpl",          "lon": "/m/04jpl",
+    "new york": "/m/02_286",      "newyork": "/m/02_286",     "纽约": "/m/02_286",     "nyc": "/m/02_286",
+    "tokyo": "/m/07dfk",          "东京": "/m/07dfk",          "tyo": "/m/07dfk",
+    "beijing": "/m/01914",        "北京": "/m/01914",          "bjs": "/m/01914",
+    "shanghai": "/m/06wjf",       "上海": "/m/06wjf",          "sha": "/m/06wjf",
+    "moscow": "/m/04swd",         "莫斯科": "/m/04swd",         "mow": "/m/04swd",
+    "stockholm": "/m/06mxs",      "斯德哥尔摩": "/m/06mxs",      "sto": "/m/06mxs",
+    "milan": "/m/0947l",          "米兰": "/m/0947l",          "mil": "/m/0947l",
+    "seoul": "/m/0hsqf",          "首尔": "/m/0hsqf",          "sel": "/m/0hsqf",
+    "osaka": "/m/0dqyw",          "大阪": "/m/0dqyw",          "osa": "/m/0dqyw",
+    "hong kong": "/m/03h64",      "hongkong": "/m/03h64",     "香港": "/m/03h64",
+    "bangkok": "/m/0fn2g",        "曼谷": "/m/0fn2g",
+    "dubai": "/m/01f08r",         "迪拜": "/m/01f08r",
+    "istanbul": "/m/09949m",      "伊斯坦布尔": "/m/09949m",
+    "buenos aires": "/m/01ly5m",  "布宜诺斯艾利斯": "/m/01ly5m",  "bue": "/m/01ly5m",
+    "são paulo": "/m/022pfm",     "sao paulo": "/m/022pfm",   "圣保罗": "/m/022pfm",  "sao": "/m/022pfm",
+    "rio de janeiro": "/m/06gmr", "里约热内卢": "/m/06gmr",      "rio": "/m/06gmr",
+    "washington": "/m/0rh6k",     "washington dc": "/m/0rh6k","华盛顿": "/m/0rh6k",   "was": "/m/0rh6k",
+    "chicago": "/m/01_d4",        "芝加哥": "/m/01_d4",         "chi": "/m/01_d4",
+    "houston": "/m/03l2n",        "休斯顿": "/m/03l2n",
+    "los angeles": "/m/030qb3t",  "losangeles": "/m/030qb3t", "洛杉矶": "/m/030qb3t",
+    "san francisco": "/m/0d6lp",  "sanfrancisco": "/m/0d6lp", "旧金山": "/m/0d6lp",
+    "toronto": "/m/0h7h6",        "多伦多": "/m/0h7h6",
+    "mexico city": "/m/04sqj",    "墨西哥城": "/m/04sqj",
 }
 
-# IATA city codes (cover multiple airports) → primary airport for SerpAPI
-_CITY_CODE_TO_AIRPORT: dict[str, str] = {
-    "PAR": "CDG",   # Paris: CDG/ORY/BVA
-    "NYC": "JFK",   # New York: JFK/LGA/EWR
-    "LON": "LHR",   # London: LHR/LGW/STN/LTN/LCY
-    "TYO": "HND",   # Tokyo: HND/NRT
-    "BJS": "PEK",   # Beijing: PEK/PKX
-    "SHA": "PVG",   # Shanghai: PVG/SHA
-    "OSA": "KIX",   # Osaka: KIX/ITM
-    "SEL": "ICN",   # Seoul: ICN/GMP
-    "MIL": "MXP",   # Milan: MXP/LIN
-    "STO": "ARN",   # Stockholm: ARN/BMA
-    "MOW": "SVO",   # Moscow: SVO/DME/VKO
-    "BUE": "EZE",   # Buenos Aires: EZE/AEP
-    "RIO": "GIG",   # Rio: GIG/SDU
-    "SAO": "GRU",   # São Paulo: GRU/CGH
-    "WAS": "IAD",   # Washington: IAD/DCA/BWI
-    "CHI": "ORD",   # Chicago: ORD/MDW
-}
+
+def _kgmid_cache_init(workspace: Path) -> None:
+    """Initialise the KGMID cache file location and load existing entries."""
+    global _KGMID_CACHE_PATH, _KGMID_CACHE
+    cache_dir = workspace.parent / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _KGMID_CACHE_PATH = cache_dir / "city_kgmid.json"
+    if _KGMID_CACHE_PATH.exists():
+        try:
+            _KGMID_CACHE = _json.loads(_KGMID_CACHE_PATH.read_text())
+        except Exception:
+            _KGMID_CACHE = {}
+    # Merge starter entries (don't overwrite user-cached values)
+    for k, v in _KGMID_STARTER.items():
+        _KGMID_CACHE.setdefault(k, v)
+
+
+def _kgmid_cache_save() -> None:
+    """Persist the KGMID cache to disk."""
+    if _KGMID_CACHE_PATH is None:
+        return
+    try:
+        _KGMID_CACHE_PATH.write_text(_json.dumps(_KGMID_CACHE, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+def _kgmid_lookup_via_search(city: str) -> str:
+    """Use SerpAPI google search to find a city's KGMID dynamically.
+    Returns "" on any failure.  Costs 1 SerpAPI call per new city."""
+    if not _SERPAPI_KEY:
+        return ""
+    try:
+        resp = _requests.get(_SERPAPI_BASE, params={
+            "engine":  "google",
+            "q":       city,
+            "api_key": _SERPAPI_KEY,
+        }, timeout=20)
+        data = resp.json()
+    except Exception:
+        return ""
+    kg = data.get("knowledge_graph") or {}
+    kgmid = kg.get("kgmid") or ""
+    # Only accept location-like KGMIDs (starts with /m/ or /g/)
+    if kgmid.startswith("/m/") or kgmid.startswith("/g/"):
+        return kgmid
+    return ""
 
 
 def _resolve_airport(value: str) -> str:
-    """Resolve a city name or IATA city code to a specific airport IATA code.
+    """Resolve a city name or airport code to a SerpAPI-acceptable identifier.
 
-    Accepts:
-      - Airport IATA code (e.g. 'DUB', 'CDG')        → passed through
-      - IATA city code  (e.g. 'PAR', 'NYC', 'LON')   → primary airport
-      - English city name (e.g. 'Paris', 'New York') → primary airport
-      - Chinese city name (e.g. '巴黎', '纽约')        → primary airport
+    Returns:
+      - The original 3-letter IATA airport code (uppercased) for inputs like
+        'DUB', 'CDG' — gives airport-level precision.
+      - A Google KGMID like '/m/05qtj' for city names in any language — gives
+        coverage of ALL airports serving that city (Paris → CDG+ORY+BVA).
 
-    Returns the original value uppercased if no match (so the caller can
-    still try it and let SerpAPI report a clean error).
+    The KGMID cache is populated from a bundled starter list plus dynamic
+    Google Search lookups; entries are persisted to ~/wisp/cache/city_kgmid.json
+    so each new city is only resolved once.
     """
     if not value:
         return value
     v = value.strip()
 
-    # Already a 3-letter all-letter code?  Check city-code mapping first,
-    # otherwise assume it's a valid airport code and pass through.
-    if len(v) == 3 and v.isalpha():
-        up = v.upper()
-        return _CITY_CODE_TO_AIRPORT.get(up, up)
+    # Cache hit on either lowercase city name or uppercase city/airport code.
+    # This way "PAR" (city code) finds the Paris KGMID, but "DUB" (airport)
+    # falls through to the 3-letter IATA passthrough below.
+    cache_key_lower = v.lower()
+    cache_key_upper = v.upper()
+    if cache_key_lower in _KGMID_CACHE:
+        return _KGMID_CACHE[cache_key_lower]
+    if cache_key_upper in _KGMID_CACHE:
+        return _KGMID_CACHE[cache_key_upper]
 
-    # City name lookup (case-insensitive, normalises whitespace)
-    key = v.lower().strip()
-    if key in _CITY_TO_AIRPORT:
-        return _CITY_TO_AIRPORT[key]
-    # Also try without spaces ("new york" → "newyork" already in table)
-    key_nospace = key.replace(" ", "")
-    if key_nospace in _CITY_TO_AIRPORT:
-        return _CITY_TO_AIRPORT[key_nospace]
+    # 3-letter all-ASCII-alpha and not in cache → assume it's an airport IATA
+    # code (NOT 3-character Chinese names — '都柏林' is len=3 and isalpha() in
+    # Python, but is not an IATA code).
+    if len(v) == 3 and v.isascii() and v.isalpha():
+        return cache_key_upper
 
-    # No match — return as-is so SerpAPI gives a meaningful error
+    # Otherwise: dynamic KGMID lookup via Google Search (one-time per city).
+    kgmid = _kgmid_lookup_via_search(v)
+    if kgmid:
+        _KGMID_CACHE[cache_key_lower] = kgmid
+        _kgmid_cache_save()
+        return kgmid
+
+    # Last resort: return as-is so SerpAPI reports a meaningful error.
     return v
 
 
@@ -1124,12 +1142,32 @@ def tool_flight_search(origin: str, destination: str, date: str,
         return (f"no flights found for {origin} → {destination} on {date}"
                 + (f" returning {return_date}" if return_date else ""))
 
+    # Extract the actual airports covered by the search from the result data.
+    # When origin/destination was a KGMID, this reveals e.g. CDG/ORY/BVA for Paris.
+    dep_airports: set[str] = set()
+    arr_airports: set[str] = set()
+    for opt in all_flights:
+        segs = opt.get("flights") or []
+        if not segs:
+            continue
+        d = segs[0].get("departure_airport", {}).get("id")
+        a = segs[-1].get("arrival_airport", {}).get("id")
+        if d: dep_airports.add(d)
+        if a: arr_airports.add(a)
+
+    def _airport_summary(orig_input: str, resolved: str, airports: set[str]) -> str:
+        """'Dublin (DUB)' or 'Paris (CDG/ORY/BVA)'."""
+        codes = "/".join(sorted(airports)) if airports else resolved
+        # Only show the input prefix when it differs from the code
+        if orig_input.upper() == codes:
+            return codes
+        return f"{orig_input} ({codes})"
+
     lines = [
-        f"Flight search: {origin_iata} → {dest_iata} on {date}"
-        + (f"  (origin '{origin}' resolved to {origin_iata})"
-           if origin_iata != origin.upper() else "")
-        + (f"  (destination '{destination}' resolved to {dest_iata})"
-           if dest_iata != destination.upper() else "")
+        f"Flight search: "
+        f"{_airport_summary(origin, origin_iata, dep_airports)} → "
+        f"{_airport_summary(destination, dest_iata, arr_airports)}  "
+        f"{date}"
         + (f"  return {return_date}" if return_date else "  one-way"),
         f"Passengers: {passengers}  Cabin: {cabin}  ({len(all_flights)} options)",
         "─" * 60,

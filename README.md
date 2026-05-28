@@ -80,7 +80,7 @@ mlx_lm.server --model <your-model-path> --port 8000
 python agent.py
 
 # One-shot mode
-python agent.py "帮我统计桌面上有多少个文件"
+python agent.py "Count how many files are on my Desktop"
 ```
 
 ## REPL commands
@@ -156,15 +156,15 @@ wisp-agent/
 The `daily_briefing` tool fetches, filters, and summarises global news into a single HTML report, opened automatically in your browser.
 
 ```
-▶ 生成今日简报
+▶ Generate today's briefing
 ```
 
 **Sections covered** (defined in `briefing.yaml`, fully customisable):
-- 🌍 政治国际 — Reuters, AP, BBC
-- 💡 ICT 前沿研究 — Nature, IEEE, MIT Technology Review, DeepMind, HuggingFace, Ars Technica
-- 🏢 高科技企业 — The Verge, Wired, Ars Technica, MIT TR
-- 🇮🇪 爱尔兰新闻 — RTÉ, Irish Times, Irish Independent, The Journal
-- 🇨🇳 中国要闻 — BBC, AP
+- 🌍 World & Politics — Reuters, AP, BBC
+- 💡 ICT Research — Nature, IEEE, MIT Technology Review, DeepMind, HuggingFace, Ars Technica
+- 🏢 Tech Industry — The Verge, Wired, Ars Technica, MIT TR
+- 🇮🇪 Ireland — RTÉ, Irish Times, Irish Independent, The Journal
+- 🇨🇳 China — BBC, AP
 
 **How it works:** RSS/page sources → per-source cap + keyword filtering → LLM translate + summarise → HTML report saved to `~/wisp/workspace/daily-report/`
 

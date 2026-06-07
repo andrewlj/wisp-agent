@@ -456,6 +456,49 @@ SCHEMAS: list[dict] = [
             "folder": {"type": "string", "description": "Optional: folder to search in."},
         }, ["title"]),
 
+    # ── Mail (macOS Mail.app) ─────────────────────────────────────────────────
+    _fn("mail_list",
+        "List emails from macOS Mail.app. Works across all configured accounts "
+        "(Gmail, Hotmail, iCloud, etc.) or a specific account. "
+        "Returns sender, subject, date, and read/unread status for each message. "
+        "Use unread_only=true to fetch only new emails.",
+        {
+            "account":     {"type": "string",  "description": "Filter by account email address (e.g. 'john@gmail.com'). Omit to list all configured accounts."},
+            "mailbox":     {"type": "string",  "description": "Folder name. Default: 'INBOX'. Others: 'Sent', 'Junk', 'Archive', 'Drafts'."},
+            "limit":       {"type": "integer", "description": "Max messages to return. Default 20."},
+            "unread_only": {"type": "boolean", "description": "If true, only return unread messages. Default false."},
+        }, []),
+
+    _fn("mail_read",
+        "Read the full content of an email from macOS Mail.app. "
+        "Returns sender, date, subject, and body text (truncated to 3000 chars).",
+        {
+            "subject": {"type": "string", "description": "Email subject (exact or partial match)."},
+            "sender":  {"type": "string", "description": "Optional: sender address or name to disambiguate."},
+            "account": {"type": "string", "description": "Optional: account email address to narrow the search."},
+            "mailbox": {"type": "string", "description": "Folder to search. Default: 'INBOX'."},
+        }, ["subject"]),
+
+    _fn("mail_delete",
+        "Move an email to Trash in macOS Mail.app. Safe delete — recoverable from Trash. "
+        "Always prefer this over permanent deletion.",
+        {
+            "subject": {"type": "string", "description": "Email subject (exact or partial match)."},
+            "sender":  {"type": "string", "description": "Optional: sender to narrow the match."},
+            "account": {"type": "string", "description": "Optional: account email address."},
+            "mailbox": {"type": "string", "description": "Source folder. Default: 'INBOX'."},
+        }, ["subject"]),
+
+    _fn("mail_move",
+        "Move an email to another folder/mailbox in macOS Mail.app.",
+        {
+            "subject":        {"type": "string", "description": "Email subject (exact or partial match)."},
+            "sender":         {"type": "string", "description": "Optional: sender to narrow the match."},
+            "account":        {"type": "string", "description": "Optional: account email address."},
+            "source_mailbox": {"type": "string", "description": "Source folder. Default: 'INBOX'."},
+            "target_mailbox": {"type": "string", "description": "Target folder, e.g. 'Junk', 'Archive'."},
+        }, ["subject", "target_mailbox"]),
+
     # ── Daily briefing ────────────────────────────────────────────────────────
     _fn("daily_briefing",
         "Generate today's global news briefing as an HTML report. "
@@ -1942,6 +1985,199 @@ end tell
     return result
 
 
+# ── Mail (macOS Mail.app) ─────────────────────────────────────────────────────
+#
+# All tools operate on Mail.app via AppleScript.
+# Mail.app must be running; accounts are whatever is configured in the app.
+# mail_delete moves to Trash (recoverable); no permanent-delete tool is provided.
+
+def _mail_acc_script(account: str) -> str:
+    """AppleScript lines to set `theAccounts` to all accounts or a specific one."""
+    if account:
+        a = account.replace('"', '\\"')
+        return (
+            f'set theAccounts to (every account whose email addresses contains "{a}")\n'
+            f'if (count of theAccounts) = 0 then\n'
+            f'    return "error: no Mail account found for \\"{a}\\""\n'
+            f'end if\n'
+        )
+    return "set theAccounts to every account\n"
+
+
+def _mail_where(subject: str, sender: str) -> str:
+    """AppleScript whose-clause filtering by subject and optional sender."""
+    s = subject.replace('"', '\\"')
+    if sender:
+        snd = sender.replace('"', '\\"')
+        return f'whose subject contains "{s}" and sender contains "{snd}"'
+    return f'whose subject contains "{s}"'
+
+
+# AppleScript snippet: formats `msgDate` → `dateStr` (YYYY-MM-DD HH:MM)
+_MAIL_FMT_DATE = (
+    'set _y to year of msgDate as string\n'
+    'set _mo to (month of msgDate as integer)\n'
+    'if _mo < 10 then set _mo to "0" & _mo\n'
+    'set _dy to day of msgDate\n'
+    'if _dy < 10 then set _dy to "0" & _dy\n'
+    'set _t to time of msgDate\n'
+    'set _h to _t div 3600\n'
+    'set _mi to (_t mod 3600) div 60\n'
+    'if _h < 10 then set _h to "0" & _h\n'
+    'if _mi < 10 then set _mi to "0" & _mi\n'
+    'set dateStr to _y & "-" & _mo & "-" & _dy & " " & _h & ":" & _mi\n'
+)
+
+
+def tool_mail_list(account: str = "", mailbox: str = "INBOX",
+                   limit: int = 20, unread_only: bool = False) -> str:
+    """List emails from macOS Mail.app across all (or a specific) account."""
+    acc_script = _mail_acc_script(account)
+    mbox = mailbox.replace('"', '\\"')
+    msgs_stmt = (
+        "set msgs to (messages of mbox whose read status is false)"
+        if unread_only else
+        "set msgs to messages of mbox"
+    )
+    unread_tag = " unread" if unread_only else ""
+
+    script = f"""
+tell application "Mail"
+    {acc_script}
+    set output to ""
+    set counter to 0
+    repeat with acc in theAccounts
+        try
+            set mbox to mailbox "{mbox}" of acc
+            set accEmail to item 1 of (email addresses of acc)
+            {msgs_stmt}
+            set msgCount to count of msgs
+            if msgCount > 0 then
+                set output to output & "[" & accEmail & "] " & msgCount & "{unread_tag} message(s)" & "\\n"
+                repeat with i from 1 to msgCount
+                    if counter >= {limit} then exit repeat
+                    set msg to item i of msgs
+                    set msgSubject to subject of msg
+                    set msgSender to sender of msg
+                    set msgRead to read status of msg
+                    set msgDate to date received of msg
+                    {_MAIL_FMT_DATE}
+                    if msgRead then
+                        set mark to "  "
+                    else
+                        set mark to "● "
+                    end if
+                    set output to output & mark & msgSender & " | " & msgSubject & " | " & dateStr & "\\n"
+                    set counter to counter + 1
+                end repeat
+                set output to output & "\\n"
+            end if
+        end try
+    end repeat
+    if output is "" then return "no messages found"
+    return output
+end tell
+"""
+    return _osascript_clean(script, timeout=60)
+
+
+def tool_mail_read(subject: str, sender: str = "", account: str = "",
+                   mailbox: str = "INBOX") -> str:
+    """Read the full content of an email from macOS Mail.app."""
+    acc_script = _mail_acc_script(account)
+    mbox = mailbox.replace('"', '\\"')
+    where = _mail_where(subject, sender)
+    s_escaped = subject.replace('"', '\\"')
+
+    script = f"""
+tell application "Mail"
+    {acc_script}
+    repeat with acc in theAccounts
+        try
+            set mbox to mailbox "{mbox}" of acc
+            set msgs to (messages of mbox {where})
+            if (count of msgs) > 0 then
+                set msg to item 1 of msgs
+                set msgFrom to sender of msg
+                set msgSubject to subject of msg
+                set msgDate to date received of msg
+                set msgContent to content of msg
+                {_MAIL_FMT_DATE}
+                if (length of msgContent) > 3000 then
+                    set msgContent to (text 1 thru 3000 of msgContent) & "\\n...[truncated]"
+                end if
+                return "From: " & msgFrom & "\\nDate: " & dateStr & "\\nSubject: " & msgSubject & "\\n---\\n" & msgContent
+            end if
+        end try
+    end repeat
+    return "error: no message found matching \\"{s_escaped}\\""
+end tell
+"""
+    return _osascript_clean(script, timeout=30)
+
+
+def tool_mail_delete(subject: str, sender: str = "", account: str = "",
+                     mailbox: str = "INBOX") -> str:
+    """Move an email to Trash in macOS Mail.app."""
+    acc_script = _mail_acc_script(account)
+    mbox = mailbox.replace('"', '\\"')
+    where = _mail_where(subject, sender)
+    s_escaped = subject.replace('"', '\\"')
+
+    script = f"""
+tell application "Mail"
+    {acc_script}
+    repeat with acc in theAccounts
+        try
+            set mbox to mailbox "{mbox}" of acc
+            set msgs to (messages of mbox {where})
+            if (count of msgs) > 0 then
+                delete item 1 of msgs
+                return "ok"
+            end if
+        end try
+    end repeat
+    return "error: no message found matching \\"{s_escaped}\\""
+end tell
+"""
+    result = _osascript_clean(script, timeout=30)
+    if result == "ok":
+        return f"ok: moved '{subject}' to Trash"
+    return result
+
+
+def tool_mail_move(subject: str, sender: str = "", account: str = "",
+                   source_mailbox: str = "INBOX", target_mailbox: str = "") -> str:
+    """Move an email to another folder in macOS Mail.app."""
+    acc_script = _mail_acc_script(account)
+    src = source_mailbox.replace('"', '\\"')
+    tgt = target_mailbox.replace('"', '\\"')
+    where = _mail_where(subject, sender)
+    s_escaped = subject.replace('"', '\\"')
+
+    script = f"""
+tell application "Mail"
+    {acc_script}
+    repeat with acc in theAccounts
+        try
+            set srcMbox to mailbox "{src}" of acc
+            set msgs to (messages of srcMbox {where})
+            if (count of msgs) > 0 then
+                set tgtMbox to mailbox "{tgt}" of acc
+                move item 1 of msgs to tgtMbox
+                return "ok"
+            end if
+        end try
+    end repeat
+    return "error: no message found matching \\"{s_escaped}\\" or target mailbox \\"{tgt}\\" not found"
+end tell
+"""
+    result = _osascript_clean(script, timeout=30)
+    if result == "ok":
+        return f"ok: moved '{subject}' to '{target_mailbox}'"
+    return result
+
+
 # ── Daily briefing ───────────────────────────────────────────────────────────
 
 def tool_daily_briefing(open_browser: bool = True,
@@ -2045,4 +2281,9 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "notes_create":     return tool_notes_create(args["title"], args["content"], args.get("folder", ""))
         case "notes_append":     return tool_notes_append(args["title"], args["content"], args.get("folder", ""))
         case "notes_delete":     return tool_notes_delete(args["title"], args.get("folder", ""))
-        case _:                  return f"error: unknown tool '{name}'"
+        # Mail
+        case "mail_list":    return tool_mail_list(args.get("account", ""), args.get("mailbox", "INBOX"), args.get("limit", 20), args.get("unread_only", False))
+        case "mail_read":    return tool_mail_read(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"))
+        case "mail_delete":  return tool_mail_delete(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"))
+        case "mail_move":    return tool_mail_move(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("source_mailbox", "INBOX"), args["target_mailbox"])
+        case _:              return f"error: unknown tool '{name}'"

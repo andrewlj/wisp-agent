@@ -410,6 +410,14 @@ SCHEMAS: list[dict] = [
             "notes":    {"type": "string", "description": "Optional event notes."},
         }, ["title", "start"]),
 
+    _fn("calendar_delete",
+        "Delete an event from macOS Calendar app.",
+        {
+            "title":    {"type": "string", "description": "Event title (exact or partial match)."},
+            "start":    {"type": "string", "description": "Optional: event start date 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' to disambiguate when multiple events share the same title."},
+            "calendar": {"type": "string", "description": "Optional: calendar name to narrow the search."},
+        }, ["title"]),
+
     # ── Notes ─────────────────────────────────────────────────────────────────
     _fn("notes_list",
         "List notes from macOS Notes app.",
@@ -440,6 +448,13 @@ SCHEMAS: list[dict] = [
             "content": {"type": "string", "description": "Text to append."},
             "folder":  {"type": "string", "description": "Optional: folder to search in."},
         }, ["title", "content"]),
+
+    _fn("notes_delete",
+        "Delete a note from macOS Notes app.",
+        {
+            "title":  {"type": "string", "description": "Note title (exact or partial match)."},
+            "folder": {"type": "string", "description": "Optional: folder to search in."},
+        }, ["title"]),
 
     # ── Daily briefing ────────────────────────────────────────────────────────
     _fn("daily_briefing",
@@ -1663,6 +1678,66 @@ return "ok"
     return result
 
 
+def tool_calendar_delete(title: str, start: str = "", calendar_name: str = "") -> str:
+    """Delete the first calendar event matching title (+ optional start date)."""
+    t = title.replace('"', '\\"')
+
+    # Optional start-date filter: compute a narrow time window (±1 min)
+    date_filter = ""
+    if start:
+        dt = _parse_dt(start)
+        if dt is None:
+            return f"error: cannot parse start '{start}' — use YYYY-MM-DD or YYYY-MM-DD HH:MM"
+        start_lines = _as_date_script("filterDate", dt)
+        date_filter = (
+            f"{start_lines}"
+            f"set filterEnd to filterDate + 60\n"
+            f"set calMatches to (every event of cal whose summary contains \"{t}\" "
+            f"and start date >= filterDate and start date <= filterEnd)\n"
+        )
+    else:
+        date_filter = f'set calMatches to (every event of cal whose summary contains "{t}")\n'
+
+    if calendar_name:
+        cal_scope = f'{{calendar "{calendar_name.replace(chr(34), chr(92)+chr(34))}"}}'
+        guard = (
+            f'if not (exists calendar "{calendar_name.replace(chr(34), chr(92)+chr(34))}") then\n'
+            f'    return "error: calendar \\"{calendar_name}\\" not found"\n'
+            f'end if\n'
+        )
+    else:
+        cal_scope = "every calendar"
+        guard = ""
+
+    script = f"""
+tell application "Calendar"
+    {guard}
+    set found to false
+    repeat with cal in ({cal_scope})
+        try
+            {date_filter}
+            if (count of calMatches) > 0 then
+                delete item 1 of calMatches
+                set found to true
+                exit repeat
+            end if
+        end try
+    end repeat
+    if found then
+        return "ok"
+    else
+        return "error: no event found matching \\"{t}\\""
+    end if
+end tell
+"""
+    result = _osascript_clean(script, timeout=15)
+    if result == "ok":
+        hint = f" on {start}" if start else ""
+        cal_hint = f" in '{calendar_name}'" if calendar_name else ""
+        return f"ok: deleted event '{title}'{hint}{cal_hint}"
+    return result
+
+
 # ── Notes ────────────────────────────────────────────────────────────────────
 
 def _notes_folder_clause(folder: str) -> tuple[str, str]:
@@ -1834,6 +1909,39 @@ return "ok"
     return result
 
 
+def tool_notes_delete(title: str, folder: str = "") -> str:
+    """Delete the first note matching title."""
+    t = title.replace('"', '\\"')
+    if folder and folder != "*":
+        f = folder.replace('"', '\\"')
+        search_clause = f'notes of folder "{f}" whose name contains "{t}"'
+        guard = (
+            f'if not (exists folder "{f}") then\n'
+            f'    return "error: folder \\"{f}\\" not found"\n'
+            f'end if\n'
+        )
+    else:
+        search_clause = f'notes whose name contains "{t}"'
+        guard = ""
+
+    script = f"""
+tell application "Notes"
+    {guard}
+    set matches to {search_clause}
+    if (count of matches) = 0 then
+        return "error: no note found matching \\"{t}\\""
+    end if
+    delete item 1 of matches
+    return "ok"
+end tell
+"""
+    result = _osascript_clean(script, timeout=20)
+    if result == "ok":
+        folder_hint = f" from '{folder}'" if folder and folder != "*" else ""
+        return f"ok: deleted note '{title}'{folder_hint}"
+    return result
+
+
 # ── Daily briefing ───────────────────────────────────────────────────────────
 
 def tool_daily_briefing(open_browser: bool = True,
@@ -1930,9 +2038,11 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         # Calendar
         case "calendar_list":    return tool_calendar_list(args.get("days", 7), args.get("calendar", ""))
         case "calendar_add":     return tool_calendar_add(args["title"], args["start"], args.get("end", ""), args.get("calendar", ""), args.get("notes", ""))
+        case "calendar_delete":  return tool_calendar_delete(args["title"], args.get("start", ""), args.get("calendar", ""))
         # Notes
         case "notes_list":       return tool_notes_list(args.get("folder", ""), args.get("limit", 20))
         case "notes_read":       return tool_notes_read(args["title"], args.get("folder", ""))
         case "notes_create":     return tool_notes_create(args["title"], args["content"], args.get("folder", ""))
         case "notes_append":     return tool_notes_append(args["title"], args["content"], args.get("folder", ""))
+        case "notes_delete":     return tool_notes_delete(args["title"], args.get("folder", ""))
         case _:                  return f"error: unknown tool '{name}'"

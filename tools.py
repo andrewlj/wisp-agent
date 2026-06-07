@@ -457,6 +457,12 @@ SCHEMAS: list[dict] = [
         }, ["title"]),
 
     # ── Mail (macOS Mail.app) ─────────────────────────────────────────────────
+    _fn("mail_accounts",
+        "List all email accounts configured in macOS Mail.app. "
+        "Call this first to discover account names and email addresses "
+        "before using mail_list or other mail tools.",
+        {}, []),
+
     _fn("mail_list",
         "List emails from macOS Mail.app. Works across all configured accounts "
         "(Gmail, Hotmail, iCloud, etc.) or a specific account. "
@@ -2029,15 +2035,44 @@ _MAIL_FMT_DATE = (
 )
 
 
+def tool_mail_accounts() -> str:
+    """List all email accounts configured in macOS Mail.app."""
+    script = """
+tell application "Mail"
+    set output to ""
+    set i to 0
+    repeat with acc in every account
+        set i to i + 1
+        set accName to full name of acc
+        try
+            set accEmail to item 1 of (email addresses of acc)
+        on error
+            set accEmail to "(unknown)"
+        end try
+        set output to output & i & ". " & accName & " <" & accEmail & ">\\n"
+    end repeat
+    if output is "" then return "no accounts configured in Mail.app"
+    return output
+end tell
+"""
+    return _osascript_clean(script, timeout=15)
+
+
 def tool_mail_list(account: str = "", mailbox: str = "INBOX",
                    limit: int = 20, unread_only: bool = False) -> str:
     """List emails from macOS Mail.app across all (or a specific) account."""
     acc_script = _mail_acc_script(account)
-    mbox = mailbox.replace('"', '\\"')
+    mbox_name = mailbox.replace('"', '\\"')
+    # Use the inbox property for INBOX (reliable across all IMAP providers),
+    # fall back to mailbox name for other folders (Sent, Junk, Archive, etc.)
+    if mailbox.upper() == "INBOX":
+        mbox_stmt = "set theMbox to inbox of acc"
+    else:
+        mbox_stmt = f'set theMbox to mailbox "{mbox_name}" of acc'
     msgs_stmt = (
-        "set msgs to (messages of mbox whose read status is false)"
+        "set msgs to (messages of theMbox whose read status is false)"
         if unread_only else
-        "set msgs to messages of mbox"
+        "set msgs to messages of theMbox"
     )
     unread_tag = " unread" if unread_only else ""
 
@@ -2048,8 +2083,8 @@ tell application "Mail"
     set counter to 0
     repeat with acc in theAccounts
         try
-            set mbox to mailbox "{mbox}" of acc
             set accEmail to item 1 of (email addresses of acc)
+            {mbox_stmt}
             {msgs_stmt}
             set msgCount to count of msgs
             if msgCount > 0 then
@@ -2072,6 +2107,8 @@ tell application "Mail"
                 end repeat
                 set output to output & "\\n"
             end if
+        on error errMsg
+            set output to output & "[error on account] " & errMsg & "\\n"
         end try
     end repeat
     if output is "" then return "no messages found"
@@ -2085,17 +2122,20 @@ def tool_mail_read(subject: str, sender: str = "", account: str = "",
                    mailbox: str = "INBOX") -> str:
     """Read the full content of an email from macOS Mail.app."""
     acc_script = _mail_acc_script(account)
-    mbox = mailbox.replace('"', '\\"')
     where = _mail_where(subject, sender)
     s_escaped = subject.replace('"', '\\"')
+    if mailbox.upper() == "INBOX":
+        mbox_stmt = "set theMbox to inbox of acc"
+    else:
+        mbox_stmt = f'set theMbox to mailbox "{mailbox.replace(chr(34), chr(92)+chr(34))}" of acc'
 
     script = f"""
 tell application "Mail"
     {acc_script}
     repeat with acc in theAccounts
         try
-            set mbox to mailbox "{mbox}" of acc
-            set msgs to (messages of mbox {where})
+            {mbox_stmt}
+            set msgs to (messages of theMbox {where})
             if (count of msgs) > 0 then
                 set msg to item 1 of msgs
                 set msgFrom to sender of msg
@@ -2120,17 +2160,20 @@ def tool_mail_delete(subject: str, sender: str = "", account: str = "",
                      mailbox: str = "INBOX") -> str:
     """Move an email to Trash in macOS Mail.app."""
     acc_script = _mail_acc_script(account)
-    mbox = mailbox.replace('"', '\\"')
     where = _mail_where(subject, sender)
     s_escaped = subject.replace('"', '\\"')
+    if mailbox.upper() == "INBOX":
+        mbox_stmt = "set theMbox to inbox of acc"
+    else:
+        mbox_stmt = f'set theMbox to mailbox "{mailbox.replace(chr(34), chr(92)+chr(34))}" of acc'
 
     script = f"""
 tell application "Mail"
     {acc_script}
     repeat with acc in theAccounts
         try
-            set mbox to mailbox "{mbox}" of acc
-            set msgs to (messages of mbox {where})
+            {mbox_stmt}
+            set msgs to (messages of theMbox {where})
             if (count of msgs) > 0 then
                 delete item 1 of msgs
                 return "ok"
@@ -2150,17 +2193,20 @@ def tool_mail_move(subject: str, sender: str = "", account: str = "",
                    source_mailbox: str = "INBOX", target_mailbox: str = "") -> str:
     """Move an email to another folder in macOS Mail.app."""
     acc_script = _mail_acc_script(account)
-    src = source_mailbox.replace('"', '\\"')
     tgt = target_mailbox.replace('"', '\\"')
     where = _mail_where(subject, sender)
     s_escaped = subject.replace('"', '\\"')
+    if source_mailbox.upper() == "INBOX":
+        src_stmt = "set srcMbox to inbox of acc"
+    else:
+        src_stmt = f'set srcMbox to mailbox "{source_mailbox.replace(chr(34), chr(92)+chr(34))}" of acc'
 
     script = f"""
 tell application "Mail"
     {acc_script}
     repeat with acc in theAccounts
         try
-            set srcMbox to mailbox "{src}" of acc
+            {src_stmt}
             set msgs to (messages of srcMbox {where})
             if (count of msgs) > 0 then
                 set tgtMbox to mailbox "{tgt}" of acc
@@ -2282,6 +2328,7 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "notes_append":     return tool_notes_append(args["title"], args["content"], args.get("folder", ""))
         case "notes_delete":     return tool_notes_delete(args["title"], args.get("folder", ""))
         # Mail
+        case "mail_accounts": return tool_mail_accounts()
         case "mail_list":    return tool_mail_list(args.get("account", ""), args.get("mailbox", "INBOX"), args.get("limit", 20), args.get("unread_only", False))
         case "mail_read":    return tool_mail_read(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"))
         case "mail_delete":  return tool_mail_delete(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"))

@@ -362,7 +362,8 @@ SCHEMAS: list[dict] = [
         "List incomplete reminders from macOS Reminders app.",
         {
             "list_name":  {"type": "string",  "description": "Optional: name of a specific Reminders list. Omit (or pass \"*\") to read all lists."},
-            "due_before": {"type": "string",  "description": "Optional: only return reminders due on or before this date (YYYY-MM-DD). Use today's date to get today's todos. Leave empty for all pending reminders."},
+            "due_before": {"type": "string",  "description": "Optional: only return reminders due on or before this date (YYYY-MM-DD)."},
+            "due_after":  {"type": "string",  "description": "Optional: only return reminders due on or after this date (YYYY-MM-DD). Combine with due_before to query a date range, e.g. today through tomorrow in one call."},
             "limit":      {"type": "integer", "description": "Max reminders to return. Default 20."},
         }, []),
 
@@ -374,6 +375,22 @@ SCHEMAS: list[dict] = [
             "notes":     {"type": "string", "description": "Optional notes/body text"},
             "list_name": {"type": "string", "description": "Target list name. Default: 'Reminders'"},
         }, ["title"]),
+
+    _fn("reminders_complete",
+        "Mark a reminder as completed (moves it to the Completed list). "
+        "Requires the exact list name — use reminders_list first if unsure.",
+        {
+            "title":     {"type": "string", "description": "Reminder title (exact or partial match)."},
+            "list_name": {"type": "string", "description": "Name of the Reminders list containing the reminder."},
+        }, ["title", "list_name"]),
+
+    _fn("reminders_delete",
+        "Permanently delete a reminder from macOS Reminders app. "
+        "Requires the exact list name — use reminders_list first if unsure.",
+        {
+            "title":     {"type": "string", "description": "Reminder title (exact or partial match)."},
+            "list_name": {"type": "string", "description": "Name of the Reminders list containing the reminder."},
+        }, ["title", "list_name"]),
 
     # ── Calendar ──────────────────────────────────────────────────────────────
     _fn("calendar_list",
@@ -1305,12 +1322,13 @@ def _as_date_script(var: str, dt) -> str:
 # ── Reminders ─────────────────────────────────────────────────────────────────
 
 def tool_reminders_list(list_name: str = "", limit: int = 20,
-                        due_before: str = "") -> str:
+                        due_before: str = "", due_after: str = "") -> str:
     """List incomplete reminders.
 
     list_name : "" or "*" → all lists; specific name → one list.
     due_before: "YYYY-MM-DD" — only return reminders due on or before this date.
-                Leave empty to return all incomplete reminders (no date filter).
+    due_after : "YYYY-MM-DD" — only return reminders due on or after this date.
+    Combine both for a date range (e.g. today through tomorrow in one call).
     """
     # Build list clause
     if list_name in ("*", ""):
@@ -1324,36 +1342,71 @@ def tool_reminders_list(list_name: str = "", limit: int = 20,
             f'end if\n'
         )
 
-    # Build optional cutoff date block (injected into AppleScript)
+    # Build cutoff date blocks injected into AppleScript
     cutoff_block = ""
-    use_cutoff   = False
+    use_before = False
+    use_after  = False
+
     if due_before:
         dt = _parse_dt(due_before)
         if dt is None:
             return f'error: invalid due_before date "{due_before}" — use YYYY-MM-DD'
-        # end-of-day of the cutoff date (23:59:59)
-        cutoff_block = (
-            f"set cutoff to current date\n"
-            f"set year of cutoff to {dt.year}\n"
-            f"set month of cutoff to {dt.month}\n"
-            f"set day of cutoff to {dt.day}\n"
-            f"set time of cutoff to 86399\n"
+        cutoff_block += (
+            f"set cutoff_before to current date\n"
+            f"set year of cutoff_before to {dt.year}\n"
+            f"set month of cutoff_before to {dt.month}\n"
+            f"set day of cutoff_before to {dt.day}\n"
+            f"set time of cutoff_before to 86399\n"
         )
-        use_cutoff = True
+        use_before = True
 
-    date_filter = (
-        # skip reminders with no due date when filtering, or due after cutoff
-        "if dd is missing value then\n"
-        "    -- no due date: skip when date filter is active\n"
-        "else if dd > cutoff then\n"
-        "    -- due after cutoff: skip\n"
-        "else\n"
-        "    set showItem to true\n"
-        "end if\n"
-        if use_cutoff else
-        # no filter: show reminders with or without due date
-        "set showItem to true\n"
-    )
+    if due_after:
+        dt2 = _parse_dt(due_after)
+        if dt2 is None:
+            return f'error: invalid due_after date "{due_after}" — use YYYY-MM-DD'
+        cutoff_block += (
+            f"set cutoff_after to current date\n"
+            f"set year of cutoff_after to {dt2.year}\n"
+            f"set month of cutoff_after to {dt2.month}\n"
+            f"set day of cutoff_after to {dt2.day}\n"
+            f"set time of cutoff_after to 0\n"
+        )
+        use_after = True
+
+    if use_before and use_after:
+        date_filter = (
+            "if dd is missing value then\n"
+            "    -- no due date: skip when date filter is active\n"
+            "else if dd < cutoff_after then\n"
+            "    -- before range start: skip\n"
+            "else if dd > cutoff_before then\n"
+            "    -- after range end: skip\n"
+            "else\n"
+            "    set showItem to true\n"
+            "end if\n"
+        )
+    elif use_before:
+        date_filter = (
+            "if dd is missing value then\n"
+            "    -- no due date: skip when date filter is active\n"
+            "else if dd > cutoff_before then\n"
+            "    -- due after cutoff: skip\n"
+            "else\n"
+            "    set showItem to true\n"
+            "end if\n"
+        )
+    elif use_after:
+        date_filter = (
+            "if dd is missing value then\n"
+            "    -- no due date: skip when date filter is active\n"
+            "else if dd < cutoff_after then\n"
+            "    -- before range start: skip\n"
+            "else\n"
+            "    set showItem to true\n"
+            "end if\n"
+        )
+    else:
+        date_filter = "set showItem to true\n"
 
     script = f"""
 tell application "Reminders"
@@ -1367,7 +1420,7 @@ tell application "Reminders"
         set listNum to listNum + 1
         if listNum > 10 then exit repeat
         set listLabel to name of theList
-        -- batch-fetch only incomplete reminders (one round-trip per property)
+        -- batch-fetch both properties via inline specifiers (one round-trip each)
         set rNames to name of (every reminder of theList whose completed is false)
         set rDues  to due date of (every reminder of theList whose completed is false)
         if (count of rNames) = 0 then
@@ -1380,7 +1433,7 @@ tell application "Reminders"
                     {date_filter}
                 end try
                 if showItem then
-                    set itemLine to listLabel & " | " & item i of rNames
+                    set itemLine to "[" & listLabel & "] " & item i of rNames
                     try
                         set dd to item i of rDues
                         if dd is not missing value then
@@ -1394,7 +1447,7 @@ tell application "Reminders"
                             set mi to (t mod 3600) div 60
                             if h < 10 then set h to "0" & h
                             if mi < 10 then set mi to "0" & mi
-                            set itemLine to itemLine & " | due: " & y & "-" & mo & "-" & dy & " " & h & ":" & mi
+                            set itemLine to itemLine & "  due: " & y & "-" & mo & "-" & dy & " " & h & ":" & mi
                         end if
                     end try
                     set output to output & itemLine & "\\n"
@@ -1442,6 +1495,52 @@ return "ok"
     if result == "ok" or "[exit 0]" in result:
         due_hint = f" (due {due})" if due else ""
         return f"ok: added reminder '{title}'{due_hint} to '{list_name}'"
+    return result
+
+
+def tool_reminders_complete(title: str, list_name: str) -> str:
+    """Mark the first matching incomplete reminder as completed."""
+    t = title.replace('"', '\\"')
+    l = list_name.replace('"', '\\"')
+    script = f"""
+tell application "Reminders"
+    if not (exists list "{l}") then
+        return "error: list \\"{l}\\" not found"
+    end if
+    set matches to (reminders of list "{l}" whose name contains "{t}" and completed is false)
+    if (count of matches) = 0 then
+        return "error: no incomplete reminder matching \\"{t}\\" in \\"{l}\\""
+    end if
+    set completed of item 1 of matches to true
+    return "ok"
+end tell
+"""
+    result = _osascript_clean(script, timeout=30)
+    if result == "ok":
+        return f"ok: marked '{title}' as completed in '{list_name}'"
+    return result
+
+
+def tool_reminders_delete(title: str, list_name: str) -> str:
+    """Permanently delete the first matching reminder."""
+    t = title.replace('"', '\\"')
+    l = list_name.replace('"', '\\"')
+    script = f"""
+tell application "Reminders"
+    if not (exists list "{l}") then
+        return "error: list \\"{l}\\" not found"
+    end if
+    set matches to (reminders of list "{l}" whose name contains "{t}")
+    if (count of matches) = 0 then
+        return "error: no reminder matching \\"{t}\\" in \\"{l}\\""
+    end if
+    delete item 1 of matches
+    return "ok"
+end tell
+"""
+    result = _osascript_clean(script, timeout=30)
+    if result == "ok":
+        return f"ok: deleted '{title}' from '{list_name}'"
     return result
 
 
@@ -1824,8 +1923,10 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "task_step_fail":   return tool_task_step_fail(args["task_id"], args["step_id"], args.get("reason", ""))
         case "learn":            return tool_learn(args["rule"], args.get("category", "general"))
         # Reminders
-        case "reminders_list":   return tool_reminders_list(args.get("list_name", ""), args.get("limit", 20), args.get("due_before", ""))
-        case "reminders_add":    return tool_reminders_add(args["title"], args.get("due", ""), args.get("notes", ""), args.get("list_name", "Reminders"))
+        case "reminders_list":     return tool_reminders_list(args.get("list_name", ""), args.get("limit", 20), args.get("due_before", ""), args.get("due_after", ""))
+        case "reminders_add":      return tool_reminders_add(args["title"], args.get("due", ""), args.get("notes", ""), args.get("list_name", "Reminders"))
+        case "reminders_complete": return tool_reminders_complete(args["title"], args["list_name"])
+        case "reminders_delete":   return tool_reminders_delete(args["title"], args["list_name"])
         # Calendar
         case "calendar_list":    return tool_calendar_list(args.get("days", 7), args.get("calendar", ""))
         case "calendar_add":     return tool_calendar_add(args["title"], args["start"], args.get("end", ""), args.get("calendar", ""), args.get("notes", ""))

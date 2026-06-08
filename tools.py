@@ -2092,18 +2092,8 @@ tell application "Mail"
     set counter to 0
     repeat with acc in theAccounts
         try
-            set accEmail to ""
-            try
-                set _addrs to email addresses of acc
-                if (count of _addrs) > 0 then set accEmail to item 1 of _addrs
-            end try
-            if accEmail is "" then
-                try
-                    set accEmail to user name of acc
-                on error
-                    set accEmail to full name of acc
-                end try
-            end if
+            -- user name holds the login email for IMAP/Exchange accounts
+            set accEmail to user name of acc
             {mbox_stmt}
             {msgs_stmt}
             set msgCount to count of msgs

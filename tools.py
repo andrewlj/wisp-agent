@@ -2092,7 +2092,18 @@ tell application "Mail"
     set counter to 0
     repeat with acc in theAccounts
         try
-            set accEmail to item 1 of (email addresses of acc)
+            set accEmail to ""
+            try
+                set _addrs to email addresses of acc
+                if (count of _addrs) > 0 then set accEmail to item 1 of _addrs
+            end try
+            if accEmail is "" then
+                try
+                    set accEmail to user name of acc
+                on error
+                    set accEmail to full name of acc
+                end try
+            end if
             {mbox_stmt}
             {msgs_stmt}
             set msgCount to count of msgs

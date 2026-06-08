@@ -2002,7 +2002,8 @@ def _mail_acc_script(account: str) -> str:
     if account:
         a = account.replace('"', '\\"')
         return (
-            f'set theAccounts to (every account whose email addresses contains "{a}")\n'
+            # Match against both email addresses list and user name (login field)
+            f'set theAccounts to (every account whose email addresses contains "{a}" or user name is "{a}")\n'
             f'if (count of theAccounts) = 0 then\n'
             f'    return "error: no Mail account found for \\"{a}\\""\n'
             f'end if\n'
@@ -2044,11 +2045,19 @@ tell application "Mail"
     repeat with acc in every account
         set i to i + 1
         set accName to full name of acc
+        -- Try email addresses list first, then user name (the login/email field)
+        set accEmail to ""
         try
-            set accEmail to item 1 of (email addresses of acc)
-        on error
-            set accEmail to "(unknown)"
+            set addrs to email addresses of acc
+            if (count of addrs) > 0 then set accEmail to item 1 of addrs
         end try
+        if accEmail is "" then
+            try
+                set accEmail to user name of acc
+            on error
+                set accEmail to "(unknown)"
+            end try
+        end if
         set output to output & i & ". " & accName & " <" & accEmail & ">\\n"
     end repeat
     if output is "" then return "no accounts configured in Mail.app"

@@ -2067,38 +2067,97 @@ end tell
     return _osascript_clean(script, timeout=15)
 
 
+def _mail_mbox_find_script(mailbox: str, account: str = "") -> str:
+    """Return AppleScript snippet that sets `foundMboxes` to matching mailboxes.
+
+    Uses ``every account`` → ``mailboxes of acc`` because:
+    - ``inbox of account`` is broken on macOS 26 (even for imap account subtypes)
+    - ``every mailbox`` at app level only returns system mailboxes (Outbox, Drafts)
+    - ``mailboxes of acc`` reliably lists all per-account mailboxes
+
+    For INBOX we match several locale names (INBOX / Inbox / 收件箱 / …).
+    Only one inbox per account is collected (exit repeat after first match).
+    """
+    if mailbox.upper() == "INBOX":
+        name_check = (
+            'mbName is "INBOX" or mbName is "Inbox" or mbName is "inbox" '
+            'or mbName is "收件箱" or mbName is "受信トレイ" or mbName is "Posteingang"'
+        )
+    else:
+        mbox_esc = mailbox.replace('"', '\\"')
+        name_check = f'mbName is "{mbox_esc}"'
+
+    if account:
+        a = account.replace('"', '\\"')
+        inner = f"""
+        if accUser is "{a}" then
+            try
+                repeat with mb in (mailboxes of acc)
+                    set mbName to name of mb
+                    if {name_check} then
+                        set end of foundMboxes to mb
+                        exit repeat
+                    end if
+                end repeat
+            end try
+        end if
+"""
+    else:
+        inner = f"""
+        try
+            repeat with mb in (mailboxes of acc)
+                set mbName to name of mb
+                if {name_check} then
+                    set end of foundMboxes to mb
+                    exit repeat
+                end if
+            end repeat
+        end try
+"""
+
+    return f"""
+set foundMboxes to {{}}
+repeat with acc in (every account)
+    set accUser to ""
+    try
+        set accUser to user name of acc
+    end try
+    {inner}
+end repeat
+"""
+
+
 def tool_mail_list(account: str = "", mailbox: str = "INBOX",
                    limit: int = 20, unread_only: bool = False) -> str:
     """List emails from macOS Mail.app across all (or a specific) account."""
-    acc_script = _mail_acc_script(account)
-    mbox_name = mailbox.replace('"', '\\"')
-    # Use the inbox property for INBOX (reliable across all IMAP providers),
-    # fall back to mailbox name for other folders (Sent, Junk, Archive, etc.)
-    if mailbox.upper() == "INBOX":
-        mbox_stmt = "set theMbox to inbox of acc"
-    else:
-        mbox_stmt = f'set theMbox to mailbox "{mbox_name}" of acc'
+    mbox_find = _mail_mbox_find_script(mailbox, account)
     msgs_stmt = (
         "set msgs to (messages of theMbox whose read status is false)"
         if unread_only else
         "set msgs to messages of theMbox"
     )
     unread_tag = " unread" if unread_only else ""
+    mbox_label = mailbox.replace('"', '\\"')
 
     script = f"""
 tell application "Mail"
-    {acc_script}
     set output to ""
     set counter to 0
-    repeat with acc in theAccounts
+    {mbox_find}
+    if (count of foundMboxes) = 0 then
+        return "no mailbox named '{mbox_label}' found — check account sync"
+    end if
+    repeat with theMbox in foundMboxes
         try
-            -- user name holds the login email for IMAP/Exchange accounts
-            set accEmail to user name of acc
-            {mbox_stmt}
+            set accLabel to ""
+            try
+                set accLabel to user name of (account of theMbox)
+            end try
+            if accLabel is "" then set accLabel to name of theMbox
             {msgs_stmt}
             set msgCount to count of msgs
             if msgCount > 0 then
-                set output to output & "[" & accEmail & "] " & msgCount & "{unread_tag} message(s)" & "\\n"
+                set output to output & "[" & accLabel & "] " & msgCount & "{unread_tag} message(s)" & "\\n"
                 repeat with i from 1 to msgCount
                     if counter >= {limit} then exit repeat
                     set msg to item i of msgs
@@ -2118,7 +2177,7 @@ tell application "Mail"
                 set output to output & "\\n"
             end if
         on error errMsg
-            set output to output & "[error on account] " & errMsg & "\\n"
+            set output to output & "[error] " & errMsg & "\\n"
         end try
     end repeat
     if output is "" then return "no messages found"
@@ -2131,20 +2190,18 @@ end tell
 def tool_mail_read(subject: str, sender: str = "", account: str = "",
                    mailbox: str = "INBOX") -> str:
     """Read the full content of an email from macOS Mail.app."""
-    acc_script = _mail_acc_script(account)
     where = _mail_where(subject, sender)
     s_escaped = subject.replace('"', '\\"')
-    if mailbox.upper() == "INBOX":
-        mbox_stmt = "set theMbox to inbox of acc"
-    else:
-        mbox_stmt = f'set theMbox to mailbox "{mailbox.replace(chr(34), chr(92)+chr(34))}" of acc'
+    mbox_find = _mail_mbox_find_script(mailbox, account)
 
     script = f"""
 tell application "Mail"
-    {acc_script}
-    repeat with acc in theAccounts
+    {mbox_find}
+    if (count of foundMboxes) = 0 then
+        return "error: mailbox not found"
+    end if
+    repeat with theMbox in foundMboxes
         try
-            {mbox_stmt}
             set msgs to (messages of theMbox {where})
             if (count of msgs) > 0 then
                 set msg to item 1 of msgs
@@ -2169,20 +2226,18 @@ end tell
 def tool_mail_delete(subject: str, sender: str = "", account: str = "",
                      mailbox: str = "INBOX") -> str:
     """Move an email to Trash in macOS Mail.app."""
-    acc_script = _mail_acc_script(account)
     where = _mail_where(subject, sender)
     s_escaped = subject.replace('"', '\\"')
-    if mailbox.upper() == "INBOX":
-        mbox_stmt = "set theMbox to inbox of acc"
-    else:
-        mbox_stmt = f'set theMbox to mailbox "{mailbox.replace(chr(34), chr(92)+chr(34))}" of acc'
+    mbox_find = _mail_mbox_find_script(mailbox, account)
 
     script = f"""
 tell application "Mail"
-    {acc_script}
-    repeat with acc in theAccounts
+    {mbox_find}
+    if (count of foundMboxes) = 0 then
+        return "error: mailbox not found"
+    end if
+    repeat with theMbox in foundMboxes
         try
-            {mbox_stmt}
             set msgs to (messages of theMbox {where})
             if (count of msgs) > 0 then
                 delete item 1 of msgs
@@ -2202,30 +2257,55 @@ end tell
 def tool_mail_move(subject: str, sender: str = "", account: str = "",
                    source_mailbox: str = "INBOX", target_mailbox: str = "") -> str:
     """Move an email to another folder in macOS Mail.app."""
-    acc_script = _mail_acc_script(account)
     tgt = target_mailbox.replace('"', '\\"')
     where = _mail_where(subject, sender)
     s_escaped = subject.replace('"', '\\"')
-    if source_mailbox.upper() == "INBOX":
-        src_stmt = "set srcMbox to inbox of acc"
-    else:
-        src_stmt = f'set srcMbox to mailbox "{source_mailbox.replace(chr(34), chr(92)+chr(34))}" of acc'
+    mbox_find = _mail_mbox_find_script(source_mailbox, account)
 
     script = f"""
 tell application "Mail"
-    {acc_script}
-    repeat with acc in theAccounts
+    {mbox_find}
+    if (count of foundMboxes) = 0 then
+        return "error: source mailbox not found"
+    end if
+    repeat with theMbox in foundMboxes
         try
-            {src_stmt}
-            set msgs to (messages of srcMbox {where})
+            set msgs to (messages of theMbox {where})
             if (count of msgs) > 0 then
-                set tgtMbox to mailbox "{tgt}" of acc
+                -- Find target in the same account first, then any account
+                set tgtMbox to missing value
+                try
+                    set srcAcc to account of theMbox
+                    repeat with tmb in (mailboxes of srcAcc)
+                        if (name of tmb) is "{tgt}" then
+                            set tgtMbox to tmb
+                            exit repeat
+                        end if
+                    end repeat
+                end try
+                if tgtMbox is missing value then
+                    -- Search all accounts
+                    repeat with searchAcc in (every account)
+                        try
+                            repeat with tmb in (mailboxes of searchAcc)
+                                if (name of tmb) is "{tgt}" then
+                                    set tgtMbox to tmb
+                                    exit repeat
+                                end if
+                            end repeat
+                        end try
+                        if tgtMbox is not missing value then exit repeat
+                    end repeat
+                end if
+                if tgtMbox is missing value then
+                    return "error: target mailbox \\"{tgt}\\" not found"
+                end if
                 move item 1 of msgs to tgtMbox
                 return "ok"
             end if
         end try
     end repeat
-    return "error: no message found matching \\"{s_escaped}\\" or target mailbox \\"{tgt}\\" not found"
+    return "error: no message found matching \\"{s_escaped}\\""
 end tell
 """
     result = _osascript_clean(script, timeout=30)

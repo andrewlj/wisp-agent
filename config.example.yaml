@@ -15,6 +15,9 @@ agent:
   strict_workspace: true            # block writes/deletes outside workspace
   context_limit: 6000               # estimated tokens before compression kicks in
   context_keep_recent: 6            # number of recent messages to keep verbatim
+  max_tool_result_chars: 4000       # cap each tool result fed to the model so a
+                                    # large output can't blow past the context
+                                    # window. Lower for tiny-context models.
   # Trim the tool menu sent to the model — fewer tools = better selection on
   # small (e.g. 9B) models. `core` (bash/read_file/write_file/done) is always on.
   # Groups: system files network browser travel reminders calendar notes mail

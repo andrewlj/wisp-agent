@@ -44,6 +44,7 @@ WORKSPACE       = _cfg["agent"].get("workspace", "~/wisp-workspace")
 STRICT          = _cfg["agent"].get("strict_workspace", True)
 CTX_LIMIT       = _cfg["agent"].get("context_limit", 6000)
 CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
+MAX_TOOL_RESULT = _cfg["agent"].get("max_tool_result_chars", 4000)
 BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
 DISABLED_TOOL_GROUPS = _cfg["agent"].get("disabled_tool_groups", []) or []
 
@@ -648,8 +649,22 @@ def run_turn(messages: list, turn: int = 0, max_turns: int = 0,
                 }},
             ]
         else:
-            _print_tool_result(str(result), elapsed)
-            tool_content = result
+            tool_content = str(result)
+            # Cap oversized results before they enter history. A single huge
+            # result (e.g. a 140-item mail list) can otherwise blow past the
+            # model's context window — compression can't shrink a kept-recent
+            # message, so the next request 400s.
+            if MAX_TOOL_RESULT > 0 and len(tool_content) > MAX_TOOL_RESULT:
+                head = tool_content[:MAX_TOOL_RESULT]
+                # cut back to the last line boundary so we don't leave a partial
+                # line (e.g. a half message-id the model might then act on)
+                nl = head.rfind("\n")
+                if nl > MAX_TOOL_RESULT // 2:
+                    head = head[:nl]
+                dropped = len(tool_content) - len(head)
+                tool_content = (head + f"\n…[truncated {dropped} chars — narrow the query "
+                                f"or use a smaller limit]")
+            _print_tool_result(tool_content, elapsed)
 
         messages.append({
             "role": "tool", "tool_call_id": tc["id"], "content": tool_content,
@@ -981,7 +996,20 @@ def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
         # many emails) don't grow context unbounded between turns.
         _maybe_compress(messages)
         _print_turn_header(turn, MAX_TURNS, messages)
-        if run_turn(messages, turn, MAX_TURNS, tool_log=tool_log):
+        try:
+            if run_turn(messages, turn, MAX_TURNS, tool_log=tool_log):
+                break
+        except requests.exceptions.HTTPError as e:
+            # 4xx (commonly context-length exceeded) won't fix on retry. Report
+            # and stop this task — but keep the REPL alive instead of crashing.
+            code = getattr(getattr(e, "response", None), "status_code", "?")
+            print(f"\n  {_rgb(200,80,80)}✗  API error {code}: request rejected.{C.RESET}")
+            print(f"  {C.DIM}{_rgb(150,150,150)}Likely the context grew past the model's "
+                  f"window. Try /new to reset, lower context_limit, or set "
+                  f"disabled_tool_groups in config.yaml.{C.RESET}")
+            break
+        except Exception as e:
+            print(f"\n  {_rgb(200,80,80)}✗  turn failed: {e}{C.RESET}")
             break
     else:
         bar = f"{_rgb(200,80,80)}{'─' * _TURN_WIDTH}{C.RESET}"

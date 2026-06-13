@@ -48,6 +48,8 @@ COMPRESS_AT_PCT = _cfg["agent"].get("compress_at_percent", 75)
 COMPRESS_AT_PCT = min(95, max(10, COMPRESS_AT_PCT))  # clamp to a sane range
 CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
 MAX_TOOL_RESULT = _cfg["agent"].get("max_tool_result_chars", 4000)
+HEADLESS_TIMEOUT   = _cfg["agent"].get("headless_timeout", 240)     # wall-clock cap for scheduled runs (s)
+HEADLESS_MAX_TURNS = _cfg["agent"].get("headless_max_turns", 10)    # turn cap for scheduled runs
 BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
 DISABLED_TOOL_GROUPS = _cfg["agent"].get("disabled_tool_groups", []) or []
 
@@ -1079,23 +1081,24 @@ def _extract_final_answer(messages: list) -> str:
 
 
 def run_agent(user_input: str, messages: list, session_id: str = "",
-              reflect: bool = True) -> str:
+              reflect: bool = True, max_turns: int | None = None) -> str:
     # Refresh system prompt so current date/time is always accurate
     messages[0] = {"role": "system", "content": _build_system_prompt(_profile)}
     messages.append({"role": "user", "content": user_input})
 
+    mt = max_turns or MAX_TURNS
     tool_log: list[tuple[str, float]] = []
     t_start  = time.time()
     turns_used = 0
 
-    for turn in range(1, MAX_TURNS + 1):
+    for turn in range(1, mt + 1):
         turns_used = turn
         # Compress before each turn so long tool-heavy loops (e.g. processing
         # many emails) don't grow context unbounded between turns.
         _maybe_compress(messages)
-        _print_turn_header(turn, MAX_TURNS, messages)
+        _print_turn_header(turn, mt, messages)
         try:
-            if run_turn(messages, turn, MAX_TURNS, tool_log=tool_log):
+            if run_turn(messages, turn, mt, tool_log=tool_log):
                 break
         except requests.exceptions.HTTPError as e:
             # 4xx (commonly context-length exceeded) won't fix on retry. Report
@@ -1112,7 +1115,7 @@ def run_agent(user_input: str, messages: list, session_id: str = "",
     else:
         bar = f"{_rgb(200,80,80)}{'─' * _TURN_WIDTH}{C.RESET}"
         print(f"\n  {bar}")
-        print(f"  {_rgb(200,80,80)}✗  stopped: {MAX_TURNS}-turn limit reached{C.RESET}")
+        print(f"  {_rgb(200,80,80)}✗  stopped: {mt}-turn limit reached{C.RESET}")
         print(f"  {bar}")
 
     # D — task summary (debug only)
@@ -1182,16 +1185,43 @@ def run_once(prompt: str, sink: str = "stdout", name: str = "wisp") -> str:
     messages = [{"role": "system", "content": _build_system_prompt(_profile)}]
     import contextlib
     from datetime import datetime
-    with open(log_path, "a", encoding="utf-8") as logf:
-        logf.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} · {name} =====\n")
-        with contextlib.redirect_stdout(logf):
-            # reflect=False: don't write learned-rules from unattended runs
-            answer = run_agent(prompt, messages, session_id="", reflect=False)
 
-    answer = answer or "(no output)"
     if sink == "stdout":
-        print(answer)
-    elif sink == "notify":
+        # ad-hoc/interactive use: redirect decoration to the log, deliver the
+        # clean answer to stdout. No wall-clock guard needed here.
+        with open(log_path, "a", encoding="utf-8") as logf:
+            logf.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} · {name} =====\n")
+            with contextlib.redirect_stdout(logf):
+                answer = run_agent(prompt, messages, reflect=False,
+                                   max_turns=HEADLESS_MAX_TURNS)
+        print(answer or "(no output)")
+        return answer or ""
+
+    # Scheduled run (notify/file): bound it with a wall-clock timeout so a slow
+    # or runaway generation can never hang a recurring job forever. Decorative
+    # output goes to the process's stdout (launchd's log); we deliver only the
+    # answer. Run in a daemon thread so we can abandon it on timeout.
+    import threading
+    box: dict = {}
+
+    def _worker():
+        try:
+            box["answer"] = run_agent(prompt, messages, reflect=False,
+                                      max_turns=HEADLESS_MAX_TURNS)
+        except Exception as e:                       # never let the thread die loud
+            box["answer"] = f"error: {e}"
+
+    th = threading.Thread(target=_worker, daemon=True)
+    th.start()
+    th.join(HEADLESS_TIMEOUT)
+    if th.is_alive():
+        partial = (_extract_final_answer(messages) or "").strip()
+        answer = (f"⚠️ 任务超过 {HEADLESS_TIMEOUT}s 未完成。" +
+                  (f"\n部分结果：\n{partial}" if partial else ""))
+    else:
+        answer = box.get("answer") or "(no output)"
+
+    if sink == "notify":
         _sink_notify(name, answer)
         _sink_file(name, answer)   # full text on disk; notification is a teaser
     elif sink == "file":

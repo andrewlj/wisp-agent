@@ -24,6 +24,9 @@ agent:
   max_tool_result_chars: 4000       # cap each tool result fed to the model so a
                                     # large output can't blow past the context
                                     # window. Lower for tiny-context models.
+  headless_timeout: 240             # wall-clock cap (s) for scheduled/headless runs —
+                                    # a slow or runaway run can't hang a recurring job
+  headless_max_turns: 10            # turn cap for scheduled/headless runs
   # Trim the tool menu sent to the model — fewer tools = better selection on
   # small (e.g. 9B) models. `core` (bash/read_file/write_file/done) is always on.
   # Groups: system files network browser travel reminders calendar notes mail

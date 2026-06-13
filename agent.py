@@ -715,18 +715,32 @@ def _sanitize_tool_pairing(messages: list) -> None:
     messages[:] = kept
 
 
+def _count_tokens_est(text: str) -> float:
+    """Language-aware token estimate. Latin/code text is ~4 chars/token, but
+    CJK characters are ~1 token each — counting everything as chars/4 (the old
+    behaviour) undercounts Chinese-heavy context 2-3x, which is how a session
+    can blow past the model's real context window while the estimate still looks
+    small. Count CJK chars as ~1 token and the rest as ~0.25."""
+    cjk = 0
+    for ch in text:
+        o = ord(ch)
+        if (0x4E00 <= o <= 0x9FFF or 0x3040 <= o <= 0x30FF or 0xAC00 <= o <= 0xD7A3
+                or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF):
+            cjk += 1
+    return cjk + (len(text) - cjk) / 4
+
+
 def _estimate_tokens(messages: list) -> int:
-    """Rough token estimate: total chars / 4."""
-    total = 0
+    """Estimate the prompt's token count (CJK-aware — see _count_tokens_est)."""
+    total = 0.0
     for m in messages:
         c = m.get("content") or ""
         if isinstance(c, list):
             c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
-        total += len(str(c))
-        # also count tool_calls arguments
+        total += _count_tokens_est(str(c))
         for tc in m.get("tool_calls", []):
-            total += len(tc.get("function", {}).get("arguments", ""))
-    return total // 4
+            total += _count_tokens_est(tc.get("function", {}).get("arguments", ""))
+    return int(total)
 
 
 def _call_api_simple(messages: list, max_tokens: int = 1024) -> str:

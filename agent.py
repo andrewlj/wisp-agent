@@ -718,9 +718,18 @@ def _maybe_compress(messages: list) -> None:
     if len(messages) < min_len:
         return
 
-    sys_msg  = messages[0]
-    recent   = messages[-CTX_KEEP_RECENT:]
-    middle   = messages[1: len(messages) - CTX_KEEP_RECENT]
+    # Determine where the kept-recent block starts. Never let it begin on a
+    # `tool` message: its parent assistant(tool_calls) would be summarised away,
+    # orphaning the tool result and breaking the API's tool-call pairing.
+    cut = len(messages) - CTX_KEEP_RECENT
+    while cut > 1 and messages[cut].get("role") == "tool":
+        cut -= 1
+    if cut <= 1:
+        return  # no safe boundary to compress at
+
+    middle = messages[1:cut]
+    if not middle:
+        return
 
     # Build a structured transcript — errors kept verbatim, ok results trimmed
     transcript = _build_compress_transcript(middle)
@@ -764,7 +773,7 @@ def _maybe_compress(messages: list) -> None:
     }
 
     # Replace messages in-place: system + summary + recent
-    messages[1:len(messages) - CTX_KEEP_RECENT] = [summary_msg]
+    messages[1:cut] = [summary_msg]
     after = len(messages)
     print(f"  {_rgb(90,60,180)}→{C.RESET} {C.DIM}{_rgb(150,120,220)}"
           f"context compressed: {before} → {after} messages{C.RESET}")
@@ -880,7 +889,6 @@ def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
     # Refresh system prompt so current date/time is always accurate
     messages[0] = {"role": "system", "content": _build_system_prompt(_profile)}
     messages.append({"role": "user", "content": user_input})
-    _maybe_compress(messages)
 
     tool_log: list[tuple[str, float]] = []
     t_start  = time.time()
@@ -888,6 +896,9 @@ def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
 
     for turn in range(1, MAX_TURNS + 1):
         turns_used = turn
+        # Compress before each turn so long tool-heavy loops (e.g. processing
+        # many emails) don't grow context unbounded between turns.
+        _maybe_compress(messages)
         _print_turn_header(turn, MAX_TURNS, messages)
         if run_turn(messages, turn, MAX_TURNS, tool_log=tool_log):
             break

@@ -1652,7 +1652,86 @@ _CAL_SKIP_PATTERNS = [
 ]
 
 
+def _run_jxa(script: str, timeout: int = 15) -> str:
+    """Run a JavaScript-for-Automation script; return stdout (strips [exit N])."""
+    result = _run(["osascript", "-l", "JavaScript", "-e", script], timeout=timeout)
+    if "[exit 0]" in result:
+        return result.split("[exit 0]")[0].strip()
+    return result
+
+
+def _format_cal_raw(raw: str, days: int) -> str:
+    """Format tab-separated `date\\tcalendar\\tsummary` lines, sorted by date."""
+    if raw.startswith("error:") or raw.startswith("no upcoming"):
+        return raw
+    lines = [l for l in raw.splitlines() if l.strip()]
+    try:
+        lines.sort(key=lambda l: l.split("\t")[0])
+    except Exception:
+        pass
+    out = []
+    for line in lines:
+        parts = line.split("\t")
+        out.append(f"{parts[0]}  {parts[1]}  {parts[2]}" if len(parts) == 3 else line)
+    return "\n".join(out) if out else f"no upcoming events in the next {days} days"
+
+
+def _calendar_list_eventkit(days: int, calendar_name: str) -> str | None:
+    """Fast path via EventKit. Returns formatted output, or None to signal that
+    the caller should fall back to AppleScript (EventKit can't see the account
+    calendars in this process — it then reports <=1 calendar)."""
+    cal_js = json.dumps(calendar_name)  # safe JS string literal
+    script = f"""
+ObjC.import('EventKit'); ObjC.import('Foundation');
+function run() {{
+  var store = $.EKEventStore.alloc.init;
+  var cals = store.calendarsForEntityType($.EKEntityTypeEvent);
+  if (cals.count <= 1) return "EK_FALLBACK";
+  var want = {cal_js};
+  var useCals = cals;
+  if (want) {{
+    var matched = [];
+    for (var i = 0; i < cals.count; i++) {{
+      var c = cals.objectAtIndex(i);
+      if (c.title.js === want) matched.push(c);
+    }}
+    if (matched.length === 0) return "EK_NOCAL";
+    useCals = $(matched);
+  }}
+  var nscal = $.NSCalendar.currentCalendar;
+  var comps = nscal.componentsFromDate(
+    $.NSCalendarUnitYear | $.NSCalendarUnitMonth | $.NSCalendarUnitDay, $.NSDate.date);
+  var start = nscal.dateFromComponents(comps);
+  var end = start.dateByAddingTimeInterval({days} * 86400);
+  var pred = store.predicateForEventsWithStartDateEndDateCalendars(start, end, useCals);
+  var evs = store.eventsMatchingPredicate(pred);
+  var fmt = $.NSDateFormatter.alloc.init; fmt.dateFormat = 'yyyy-MM-dd HH:mm';
+  var out = [];
+  for (var i = 0; i < evs.count && i < 200; i++) {{
+    var e = evs.objectAtIndex(i);
+    out.push(fmt.stringFromDate(e.startDate).js + '\\t' + e.calendar.title.js
+             + '\\t' + (e.title ? e.title.js : '(no title)'));
+  }}
+  return out.length ? out.join('\\n') : 'EK_NONE';
+}}
+"""
+    raw = _run_jxa(script, timeout=15)
+    if raw.startswith("error:") or "EK_FALLBACK" in raw or "execution error" in raw:
+        return None  # fall back to AppleScript
+    if raw.strip() == "EK_NOCAL":
+        return f'error: calendar "{calendar_name}" not found'
+    if raw.strip() == "EK_NONE":
+        return f"no upcoming events in the next {days} days"
+    return _format_cal_raw(raw, days)
+
+
 def tool_calendar_list(days: int = 7, calendar_name: str = "") -> str:
+    # Fast path: EventKit (indexed, ~0.2s). Falls back to AppleScript when the
+    # account calendars aren't visible to EventKit in this process.
+    ek = _calendar_list_eventkit(days, calendar_name)
+    if ek is not None:
+        return ek
+
     if calendar_name:
         cal_clause = f'{{calendar "{calendar_name}"}}'
         guard = (
@@ -1714,21 +1793,7 @@ end tell
     raw = _osascript_clean(script, timeout=60)
     if raw.startswith("error:") or raw.startswith("no upcoming"):
         return raw
-
-    # Sort by date and format for display
-    lines = [l for l in raw.splitlines() if l.strip()]
-    try:
-        lines.sort(key=lambda l: l.split("\t")[0])
-    except Exception:
-        pass
-    result_lines = []
-    for line in lines:
-        parts = line.split("\t")
-        if len(parts) == 3:
-            result_lines.append(f"{parts[0]}  {parts[1]}  {parts[2]}")
-        else:
-            result_lines.append(line)
-    return "\n".join(result_lines)
+    return _format_cal_raw(raw, days)
 
 
 def tool_calendar_add(title: str, start: str, end: str = "",

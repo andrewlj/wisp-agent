@@ -266,6 +266,17 @@ SCHEMAS: list[dict] = [
             "headers": {"type": "object", "description": "Optional request headers"},
         }, ["url", "body"]),
 
+    _fn("web_search",
+        "Search the web (Google, via SerpAPI) for current or unknown information. "
+        "Returns a direct answer when one is available, plus the top results "
+        "(title, snippet, link). Prefer this over guessing for facts, news, "
+        "prices, docs, or anything that may have changed — it's faster and "
+        "cleaner than driving the browser.",
+        {
+            "query": {"type": "string",  "description": "The search query."},
+            "limit": {"type": "integer", "description": "Max results to return. Default 5, max 10."},
+        }, ["query"]),
+
     # ── Browser ───────────────────────────────────────────────────────────────
     _fn("browser_open",
         "Open a URL in a Playwright-controlled Chromium browser. Creates the browser if not running.",
@@ -862,6 +873,38 @@ def tool_http_post(url: str, body: dict, headers: dict | None = None) -> str:
         return f"status: {resp.status_code}\n{text}"
     except Exception as e:
         return f"error: {e}"
+
+
+def tool_web_search(query: str, limit: int = 5) -> str:
+    """Search Google via SerpAPI; return a direct answer (if any) + top results."""
+    limit = max(1, min(int(limit or 5), 10))
+    data = _serpapi_call({"engine": "google", "q": query, "num": limit})
+    if isinstance(data, str):
+        return data  # error string
+
+    out: list[str] = []
+    # Direct answer if Google surfaced one
+    ab = data.get("answer_box") or {}
+    direct = ab.get("answer") or ab.get("snippet") or ab.get("result")
+    if direct:
+        out.append(f"[answer] {direct}")
+    kg = data.get("knowledge_graph") or {}
+    if not direct and kg.get("description"):
+        title = kg.get("title", "")
+        out.append(f"[info] {title}: {kg['description']}" if title else f"[info] {kg['description']}")
+
+    for r in (data.get("organic_results") or [])[:limit]:
+        title = (r.get("title") or "").strip()
+        snip  = (r.get("snippet") or "").strip()
+        link  = (r.get("link") or "").strip()
+        line = f"• {title}"
+        if snip:
+            line += f"\n  {snip}"
+        if link:
+            line += f"\n  {link}"
+        out.append(line)
+
+    return "\n".join(out) if out else "no results"
 
 
 # ── Browser ───────────────────────────────────────────────────────────────────
@@ -3186,7 +3229,7 @@ def _group_of(name: str) -> str:
         "list_apps": "system", "focus_app": "system", "quit_app": "system",
         "find_files": "files", "move_file": "files", "copy_file": "files",
         "delete_file": "files",
-        "http_get": "network", "http_post": "network",
+        "http_get": "network", "http_post": "network", "web_search": "network",
         "flight_search": "travel", "hotel_search": "travel",
         "daily_briefing": "news", "learn": "learn",
     }.get(name, "misc")

@@ -1416,6 +1416,86 @@ def _as_date_script(var: str, dt) -> str:
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
 
+def _reminders_list_eventkit(list_name: str, limit: int,
+                             due_before: str, due_after: str) -> str | None:
+    """Fast path via EventKit. Returns formatted output, or None to fall back to
+    AppleScript (EventKit reports 0 reminder lists / times out)."""
+    start_e = end_e = -1.0
+    if due_after:
+        dt = _parse_dt(due_after)
+        if dt is not None:
+            start_e = dt.replace(hour=0, minute=0, second=0).timestamp()
+    if due_before:
+        dt = _parse_dt(due_before)
+        if dt is not None:
+            end_e = dt.replace(hour=23, minute=59, second=59).timestamp()
+
+    want = json.dumps("" if list_name in ("*", "") else list_name)
+    script = f"""
+ObjC.import('EventKit'); ObjC.import('Foundation');
+function run() {{
+  var store = $.EKEventStore.alloc.init;
+  var cals = store.calendarsForEntityType($.EKEntityTypeReminder);
+  if (cals.count < 1) return "EK_FALLBACK";
+  var want = {want};
+  var useCals = cals;
+  if (want) {{
+    var matched = [];
+    for (var i = 0; i < cals.count; i++) {{
+      var c = cals.objectAtIndex(i);
+      if (c.title.js === want) matched.push(c);
+    }}
+    if (matched.length === 0) return "EK_NOLIST";
+    useCals = $(matched);
+  }}
+  var startE = {start_e}, endE = {end_e};
+  var sd, ed;
+  if (startE >= 0 || endE >= 0) {{
+    sd = startE >= 0 ? $.NSDate.dateWithTimeIntervalSince1970(startE) : $.NSDate.distantPast;
+    ed = endE >= 0 ? $.NSDate.dateWithTimeIntervalSince1970(endE) : $.NSDate.distantFuture;
+  }} else {{ sd = $(); ed = $(); }}
+  var pred = store.predicateForIncompleteRemindersWithDueDateStartingEndingCalendars(sd, ed, useCals);
+  var result = null, done = false;
+  store.fetchRemindersMatchingPredicateCompletion(pred, function(rems) {{
+    var nscal = $.NSCalendar.currentCalendar;
+    var fmt = $.NSDateFormatter.alloc.init; fmt.dateFormat = 'yyyy-MM-dd HH:mm';
+    var out = [];
+    for (var i = 0; i < rems.count && out.length < {limit}; i++) {{
+      var r = rems.objectAtIndex(i);
+      var t = r.title ? r.title.js : '(no title)';
+      var cn = r.calendar ? r.calendar.title.js : '?';
+      var line = '[' + cn + '] ' + t;
+      try {{
+        var dc = r.dueDateComponents;
+        if (dc) {{
+          var d = nscal.dateFromComponents(dc);
+          var s = d ? fmt.stringFromDate(d).js : '';
+          if (s) line += '  due: ' + s;
+        }}
+      }} catch (e) {{}}
+      out.push(line);
+    }}
+    result = out; done = true;
+  }});
+  var deadline = $.NSDate.dateWithTimeIntervalSinceNow(15);
+  while (!done && $.NSDate.date.compare(deadline) < 0) {{
+    $.NSRunLoop.currentRunLoop.runModeBeforeDate($.NSDefaultRunLoopMode,
+      $.NSDate.dateWithTimeIntervalSinceNow(0.05));
+  }}
+  if (!done) return "EK_FALLBACK";
+  return result.length ? result.join('\\n') : "EK_NONE";
+}}
+"""
+    raw = _run_jxa(script, timeout=20)
+    if raw.startswith("error:") or "EK_FALLBACK" in raw or "execution error" in raw:
+        return None
+    if raw.strip() == "EK_NOLIST":
+        return f'error: list "{list_name}" not found'
+    if raw.strip() == "EK_NONE":
+        return "no pending reminders"
+    return raw
+
+
 def tool_reminders_list(list_name: str = "", limit: int = 20,
                         due_before: str = "", due_after: str = "") -> str:
     """List incomplete reminders.
@@ -1425,6 +1505,18 @@ def tool_reminders_list(list_name: str = "", limit: int = 20,
     due_after : "YYYY-MM-DD" — only return reminders due on or after this date.
     Combine both for a date range (e.g. today through tomorrow in one call).
     """
+    # Validate dates up front (shared by both paths)
+    if due_before and _parse_dt(due_before) is None:
+        return f'error: invalid due_before date "{due_before}" — use YYYY-MM-DD'
+    if due_after and _parse_dt(due_after) is None:
+        return f'error: invalid due_after date "{due_after}" — use YYYY-MM-DD'
+
+    # Fast path: EventKit (~0.2s). Falls back to AppleScript if reminder lists
+    # aren't visible to EventKit in this process or the async fetch times out.
+    ek = _reminders_list_eventkit(list_name, limit, due_before, due_after)
+    if ek is not None:
+        return ek
+
     # Build list clause
     if list_name in ("*", ""):
         list_clause = "every list"

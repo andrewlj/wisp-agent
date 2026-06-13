@@ -447,6 +447,23 @@ def _llm_post(payload: dict, stream: bool = False) -> requests.Response:
 
 # ── Streaming API ─────────────────────────────────────────────────────────────
 
+def _detect_context_window() -> int:
+    """Best-effort: read the active model's context size from the server's
+    /v1/models (the omlx / MLX OpenAI-compatible servers report `max_model_len`).
+    Returns 0 if the server is unreachable or doesn't expose it."""
+    try:
+        url = BASE_URL.replace("/chat/completions", "/models")
+        resp = requests.get(url, headers={"Authorization": f"Bearer {API_KEY}"},
+                            timeout=5)
+        resp.raise_for_status()
+        for m in resp.json().get("data", []):
+            if m.get("id") == MODEL:
+                return int(m.get("max_model_len") or 0)
+    except Exception:
+        pass
+    return 0
+
+
 def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
     """Stream one LLM turn.  Returns (content, tool_calls, usage).
 
@@ -1114,6 +1131,19 @@ def interactive() -> None:
     else:
         _profile = _load_profile()
         print_banner()
+
+    # Auto-detect the model's context window from the server unless the user
+    # set model.context_window manually (>0 overrides).
+    global CONTEXT_WINDOW
+    if CONTEXT_WINDOW <= 0:
+        detected = _detect_context_window()
+        if detected > 0:
+            CONTEXT_WINDOW = detected
+            print(c(C.GRAY, f"  context window: {detected} tokens (from server)  ·  "
+                            f"compress at {COMPRESS_AT_PCT}%\n"))
+        else:
+            print(c(C.GRAY, "  context window: unknown (server didn't report it) — "
+                            "set model.context_window to enable compression\n"))
 
     _sys_prompt = _build_system_prompt(_profile)
 

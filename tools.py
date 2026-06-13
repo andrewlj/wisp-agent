@@ -514,8 +514,9 @@ SCHEMAS: list[dict] = [
 
     _fn("mail_move",
         "Move an email to another folder in macOS Mail.app. target_mailbox accepts "
-        "semantic aliases: 'junk'/'spam'/'垃圾邮件' → the account's Junk folder; "
-        "'trash'/'废纸篓'/'已删除' → Trash; or a literal folder name like 'Archive'. "
+        "semantic aliases that resolve to the right folder per account/locale: "
+        "'junk'/'spam'/'垃圾邮件' → Junk; 'trash'/'废纸篓'/'已删除' → Trash; "
+        "'archive'/'存档'/'归档' → Archive (All Mail on Gmail). Or a literal folder name. "
         "Moving inbound mail into Drafts/Outbox/Sent is refused. "
         "Prefer message_id (from mail_list) to locate the message.",
         {
@@ -524,7 +525,7 @@ SCHEMAS: list[dict] = [
             "sender":         {"type": "string", "description": "Optional: sender to narrow the match."},
             "account":        {"type": "string", "description": "Optional: account email address."},
             "source_mailbox": {"type": "string", "description": "Source folder. Default: 'INBOX'."},
-            "target_mailbox": {"type": "string", "description": "Target: 'junk', 'trash', 'Archive', or a folder name."},
+            "target_mailbox": {"type": "string", "description": "Target: 'junk', 'trash', 'archive', or a literal folder name."},
         }, ["target_mailbox"]),
 
     # ── Daily briefing ────────────────────────────────────────────────────────
@@ -2062,12 +2063,22 @@ _MBOX_TRASH_NAMES = [
     "Trash", "Deleted Messages", "Deleted Items", "Bin",
     "已删除邮件", "已删除", "废纸篓", "已刪除郵件",
 ]
+# Gmail has no real Archive folder — archiving = removing the INBOX label, which
+# leaves the message in "All Mail" / "所有邮件". Map archive there as the closest
+# equivalent; Hotmail/Exchange use a literal Archive ("存档") folder.
+_MBOX_ARCHIVE_NAMES = [
+    "Archive", "Archived", "存档", "归档", "封存",
+    "All Mail", "所有邮件", "所有郵件",
+]
 # Aliases the user/agent may type → canonical category
 _MBOX_ALIAS = {
     "junk": "junk", "spam": "junk", "垃圾": "junk", "垃圾箱": "junk",
     "垃圾邮件": "junk", "广告": "junk",
     "trash": "trash", "bin": "trash", "废纸篓": "trash", "删除": "trash",
     "已删除": "trash", "已删除邮件": "trash", "回收站": "trash",
+    "archive": "archive", "archived": "archive", "存档": "archive",
+    "归档": "archive", "封存": "archive", "all mail": "archive",
+    "所有邮件": "archive",
 }
 # Targets that never make sense as a move destination for inbound cleanup
 _MBOX_FORBIDDEN = {
@@ -2077,7 +2088,7 @@ _MBOX_FORBIDDEN = {
 
 
 def _mbox_category(target: str) -> str | None:
-    """Map a user-supplied target name to 'junk'/'trash', or None if literal."""
+    """Map a target name to 'junk'/'trash'/'archive', or None if a literal name."""
     t = target.strip().lower()
     return _MBOX_ALIAS.get(t)
 
@@ -2339,6 +2350,9 @@ def _mbox_target_resolver(target_mailbox: str) -> tuple[str, str]:
     elif category == "trash":
         candidates = _MBOX_TRASH_NAMES
         label = "Trash"
+    elif category == "archive":
+        candidates = _MBOX_ARCHIVE_NAMES
+        label = "Archive"
     else:
         # Literal name — but block obviously-wrong destinations
         if target_mailbox.strip().lower() in _MBOX_FORBIDDEN:

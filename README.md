@@ -100,7 +100,7 @@ python agent.py "Count how many files are on my Desktop"
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (54 total)
+## Tools (55 total)
 
 | Category | Tools |
 |----------|-------|
@@ -113,7 +113,7 @@ python agent.py "Count how many files are on my Desktop"
 | Reminders | `reminders_list`, `reminders_add`, `reminders_complete`, `reminders_delete` |
 | Calendar | `calendar_list`, `calendar_add`, `calendar_delete` |
 | Notes | `notes_list`, `notes_read`, `notes_create`, `notes_append`, `notes_delete` |
-| Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_delete`, `mail_junk`, `mail_move`, `mail_move_all` |
+| Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_send`, `mail_delete`, `mail_junk`, `mail_move`, `mail_move_all` |
 | Task | `task_init`, `task_step_done`, `task_step_fail` |
 | News | `daily_briefing` |
 | Learn | `learn` |

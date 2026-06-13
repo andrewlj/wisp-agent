@@ -524,6 +524,17 @@ SCHEMAS: list[dict] = [
             "target_mailbox": {"type": "string", "description": "Target: 'junk', 'trash', 'archive', or a literal folder name."},
         }, ["target_mailbox"]),
 
+    _fn("mail_send",
+        "Send an email via macOS Mail.app. Sends immediately. Use this to "
+        "compose and send mail — do NOT hand-write osascript for sending.",
+        {
+            "to":      {"type": "string", "description": "Recipient address(es), comma-separated."},
+            "subject": {"type": "string", "description": "Email subject."},
+            "body":    {"type": "string", "description": "Email body text."},
+            "account": {"type": "string", "description": "From account email (e.g. 'me@hotmail.com'). Omit to use Mail's default account."},
+            "cc":      {"type": "string", "description": "Optional CC address(es), comma-separated."},
+        }, ["to", "subject", "body"]),
+
     _fn("mail_move_all",
         "Move ALL messages from one folder to another, within each account. "
         "Main use: empty the Trash by moving everything into Junk — macOS Mail "
@@ -2942,6 +2953,82 @@ tell application "Mail"
 end tell
 """
     return _osascript_clean(script, timeout=120)
+
+
+def _osa_str(s: str) -> str:
+    """Quote a Python string as an AppleScript string literal, handling quotes,
+    backslashes, and newlines (which can't appear raw inside an AS string)."""
+    s = (s or "").replace("\\", "\\\\").replace('"', '\\"')
+    s = s.replace("\r\n", "\n").replace("\n", '" & linefeed & "')
+    return '"' + s + '"'
+
+
+def tool_mail_send(to: str, subject: str, body: str,
+                   account: str = "", cc: str = "") -> str:
+    """Send an email via macOS Mail.app.
+
+    `account` selects the From account by email (omit for Mail's default). `to`
+    and `cc` accept comma-separated addresses. Sends immediately (silently).
+    """
+    if not (to or "").strip():
+        return "error: 'to' recipient is required"
+
+    if account:
+        a = account.replace('"', '\\"')
+        sender_block = f"""
+    set senderStr to ""
+    repeat with acc in every account
+        set au to ""
+        try
+            set au to user name of acc
+        end try
+        if au is "{a}" then
+            set fn to ""
+            try
+                set fn to full name of acc
+            end try
+            if fn is "" then
+                set senderStr to au
+            else
+                set senderStr to fn & " <" & au & ">"
+            end if
+            exit repeat
+        end if
+    end repeat
+    if senderStr is "" then return "error: no Mail account found for \\"{a}\\""
+"""
+        set_sender = "        set sender to senderStr"
+    else:
+        sender_block = ""
+        set_sender = ""
+
+    to_lines = "\n".join(
+        f"        make new to recipient at end of to recipients with properties {{address:{_osa_str(addr.strip())}}}"
+        for addr in to.split(",") if addr.strip()
+    )
+    cc_lines = "\n".join(
+        f"        make new cc recipient at end of cc recipients with properties {{address:{_osa_str(addr.strip())}}}"
+        for addr in (cc or "").split(",") if addr.strip()
+    )
+
+    script = f"""
+tell application "Mail"
+    {sender_block}
+    set newMsg to make new outgoing message with properties {{subject:{_osa_str(subject)}, content:{_osa_str(body)}, visible:false}}
+    tell newMsg
+{to_lines}
+{cc_lines}
+{set_sender}
+    end tell
+    send newMsg
+    return "ok"
+end tell
+"""
+    result = _osascript_clean(script, timeout=30)
+    if result == "ok":
+        frm = f" from {account}" if account else ""
+        return f"ok: sent '{subject}' to {to}{frm}"
+    return result
 
 
 # ── Daily briefing ───────────────────────────────────────────────────────────

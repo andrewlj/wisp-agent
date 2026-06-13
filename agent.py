@@ -6,6 +6,7 @@ Dependencies: requests, pyyaml, prompt_toolkit, playwright
 """
 
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1054,7 +1055,31 @@ def _print_task_summary(tool_log: list[tuple[str, float]], total_s: float, turns
     print(f"  {line}")
 
 
-def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
+def _extract_final_answer(messages: list) -> str:
+    """Pull the agent's final answer from the message list — the last assistant
+    text, or the `done` tool-call's result. Used by headless/scheduled runs."""
+    answer = ""
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if content and str(content).strip():
+            answer = str(content).strip()
+        for tc in m.get("tool_calls", []):
+            if tc.get("function", {}).get("name") == "done":
+                try:
+                    res = json.loads(tc["function"].get("arguments") or "{}").get("result", "")
+                    if res.strip():
+                        answer = res.strip()
+                except Exception:
+                    pass
+    return answer
+
+
+def run_agent(user_input: str, messages: list, session_id: str = "",
+              reflect: bool = True) -> str:
     # Refresh system prompt so current date/time is always accurate
     messages[0] = {"role": "system", "content": _build_system_prompt(_profile)}
     messages.append({"role": "user", "content": user_input})
@@ -1094,10 +1119,86 @@ def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
     _print_task_summary(tool_log, time.time() - t_start, turns_used)
 
     # Post-task reflection: learn from failures and corrections
-    _post_task_reflect(messages)
+    if reflect:
+        _post_task_reflect(messages)
     # Auto-save session after every agent loop
     if session_id:
         _session.save(session_id, messages)
+
+    return _extract_final_answer(messages)
+
+
+# ── Headless run + output sinks (shared core for Scheduler / future Gateway) ───
+
+_WISP_HOME = Path(WORKSPACE).expanduser().parent  # ~/wisp
+
+
+def _sink_notify(title: str, body: str) -> None:
+    """macOS notification. Notifications are short, so we truncate and rely on
+    the file sink for the full text."""
+    short = " ".join(body.split())[:230]
+    s = short.replace("\\", "\\\\").replace('"', '\\"')
+    t = title.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        subprocess.run(["osascript", "-e",
+                        f'display notification "{s}" with title "{t}"'],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _sink_file(name: str, body: str) -> str:
+    """Write the full output to ~/wisp/workspace/briefings/<name>-<date>.md."""
+    from datetime import datetime
+    out_dir = Path(WORKSPACE).expanduser() / "briefings"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+    path = out_dir / f"{name}-{stamp}.md"
+    path.write_text(f"# {name} · {stamp}\n\n{body}\n", encoding="utf-8")
+    return str(path)
+
+
+def run_once(prompt: str, sink: str = "stdout", name: str = "wisp") -> str:
+    """Run a single agent task headlessly and deliver the result via `sink`.
+
+    The shared entrypoint for scheduled jobs (and, later, a remote Gateway):
+    decoupled from the REPL, with pluggable output. All the decorative agent
+    output is redirected to a per-run log; only the final answer is delivered.
+    Returns the final answer text.
+    """
+    global _profile
+    if _profile is None:
+        _profile = _load_profile() if _PROFILE_PATH.exists() else {}
+
+    # Resolve the context window the same way the REPL does (server / config).
+    global CONTEXT_WINDOW
+    if CONTEXT_WINDOW <= 0:
+        CONTEXT_WINDOW = _detect_context_window()
+
+    log_dir = _WISP_HOME / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{name}.log"
+
+    messages = [{"role": "system", "content": _build_system_prompt(_profile)}]
+    import contextlib
+    from datetime import datetime
+    with open(log_path, "a", encoding="utf-8") as logf:
+        logf.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} · {name} =====\n")
+        with contextlib.redirect_stdout(logf):
+            # reflect=False: don't write learned-rules from unattended runs
+            answer = run_agent(prompt, messages, session_id="", reflect=False)
+
+    answer = answer or "(no output)"
+    if sink == "stdout":
+        print(answer)
+    elif sink == "notify":
+        _sink_notify(name, answer)
+        _sink_file(name, answer)   # full text on disk; notification is a teaser
+    elif sink == "file":
+        path = _sink_file(name, answer)
+        print(f"saved: {path}")
+    return answer
+
 
 # ── REPL helpers ──────────────────────────────────────────────────────────────
 
@@ -1321,11 +1422,48 @@ def interactive() -> None:
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
+def _cli_run(argv: list[str]) -> None:
+    """`agent.py run …` — headless single task. Either --job <name> (from the
+    schedule file) or a positional prompt with optional --sink/--name."""
+    sink, name, job = "stdout", "wisp", None
+    prompt_parts: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--sink" and i + 1 < len(argv):
+            sink = argv[i + 1]; i += 2
+        elif a == "--name" and i + 1 < len(argv):
+            name = argv[i + 1]; i += 2
+        elif a == "--job" and i + 1 < len(argv):
+            job = argv[i + 1]; i += 2
+        else:
+            prompt_parts.append(a); i += 1
+
+    if job:
+        import schedule as _sched
+        j = _sched.get_job(job)
+        if not j:
+            print(f"error: no scheduled job named '{job}'"); sys.exit(1)
+        run_once(j["prompt"], j.get("sink", "notify"), name=j["name"])
+    else:
+        prompt = " ".join(prompt_parts).strip()
+        if not prompt:
+            print('usage: agent.py run "<prompt>" [--sink notify|file|stdout] [--name X]')
+            sys.exit(1)
+        run_once(prompt, sink, name=name)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        oneshot_task = " ".join(sys.argv[1:]).strip()
+    _argv = sys.argv[1:]
+    if _argv and _argv[0] == "run":
+        _cli_run(_argv[1:])
+    elif _argv and _argv[0] == "schedule":
+        import schedule as _sched
+        _sched.cli(_argv[1:])
+    elif _argv:
+        # legacy one-shot: agent.py "<task>"
         _profile  = _load_profile()
         messages  = [{"role": "system", "content": _build_system_prompt(_profile)}]
-        run_agent(oneshot_task, messages)
+        run_agent(" ".join(_argv), messages)
     else:
         interactive()

@@ -1132,18 +1132,27 @@ def interactive() -> None:
         _profile = _load_profile()
         print_banner()
 
-    # Auto-detect the model's context window from the server unless the user
-    # set model.context_window manually (>0 overrides).
+    # Context window = the smaller of the configured value and what the server
+    # reports (max_model_len), so we never exceed either limit. Either may be
+    # absent (0); if both are, compression stays off.
     global CONTEXT_WINDOW
-    if CONTEXT_WINDOW <= 0:
-        detected = _detect_context_window()
-        if detected > 0:
-            CONTEXT_WINDOW = detected
-            print(c(C.GRAY, f"  context window: {detected} tokens (from server)  ·  "
-                            f"compress at {COMPRESS_AT_PCT}%\n"))
+    configured = CONTEXT_WINDOW
+    detected   = _detect_context_window()
+    candidates = [v for v in (configured, detected) if v > 0]
+    if candidates:
+        CONTEXT_WINDOW = min(candidates)
+        if configured > 0 and detected > 0:
+            src = f"min of config {configured} / server {detected}"
+        elif detected > 0:
+            src = "from server"
         else:
-            print(c(C.GRAY, "  context window: unknown (server didn't report it) — "
-                            "set model.context_window to enable compression\n"))
+            src = "from config"
+        print(c(C.GRAY, f"  context window: {CONTEXT_WINDOW} tokens ({src})  ·  "
+                        f"compress at {COMPRESS_AT_PCT}%\n"))
+    else:
+        CONTEXT_WINDOW = 0
+        print(c(C.GRAY, "  context window: unknown (server didn't report it) — "
+                        "set model.context_window to enable compression\n"))
 
     _sys_prompt = _build_system_prompt(_profile)
 

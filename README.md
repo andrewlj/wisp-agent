@@ -139,8 +139,10 @@ All persistent data lives under `~/wisp/`:
 
 ```
 wisp-agent/
-├── agent.py              # Main loop, REPL, context compression, API
+├── agent.py              # Main loop, REPL, headless run_once, context compression, API
 ├── tools.py              # All tool schemas and implementations
+├── schedule.py           # Recurring jobs via launchd (Scheduler)
+├── gateway.py            # Telegram gateway (chat with wisp from your phone)
 ├── briefing.py           # Daily news briefing generator (processing only)
 ├── briefing.yaml         # Briefing sources, domains, and filters (edit freely)
 ├── session.py            # Session save/load/list
@@ -177,6 +179,21 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 ---
 
 ## Development Log
+
+### v1.3 — Telegram gateway
+
+Chat with wisp from your phone, and let scheduled jobs deliver to Telegram.
+
+- `gateway.py` long-polls Telegram `getUpdates`, serves **only** the configured
+  `user_id`, runs each message through `run_once(sink=telegram)` and replies in
+  chat. Runs as a persistent LaunchAgent (`KeepAlive`, `RunAtLoad`) via
+  `python agent.py gateway install`.
+- New `telegram` sink (`_telegram_send`, 4096-char splitting) usable by both the
+  gateway and scheduled jobs, so a morning briefing can land on your phone.
+- Deliberately reuses the headless `run_once` core from v1.1 — Telegram is just
+  the transport, so the Scheduler and Gateway share one execution engine.
+- Config: `telegram.bot_token` / `telegram.user_id` (real values only in the
+  gitignored `config.yaml`).
 
 ### v1.2 — Web search & email composition
 
@@ -420,7 +437,8 @@ across multiple accounts (Gmail, Hotmail/Outlook, iCloud) in mixed languages:
 ## Roadmap
 
 - [x] Scheduler — recurring headless tasks via launchd (v1.1)
-- [ ] Gateway architecture — Unix socket IPC + Telegram bot adapter for remote Mac control (reuses the v1.1 headless `run_once` core)
+- [x] Gateway — Telegram bot adapter for remote control, reusing the headless `run_once` core (v1.3)
+- [ ] Contacts integration — resolve names → addresses (needs a one-time Contacts permission grant)
 - [ ] Tool set expansion — more reliable automation coverage
 
 ## License

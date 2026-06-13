@@ -100,20 +100,20 @@ python agent.py "Count how many files are on my Desktop"
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (58 total)
+## Tools (60 total)
 
 | Category | Tools |
 |----------|-------|
 | Core | `bash`, `read_file`, `write_file`, `done` |
 | Mac system | `screenshot`, `osascript`, `clipboard_read/write`, `open`, `list_apps`, `focus_app`, `quit_app` |
 | File ops | `find_files`, `move_file`, `copy_file`, `delete_file` |
-| Network | `http_get`, `http_post` |
+| Network | `http_get`, `http_post`, `web_search` |
 | Browser | `browser_open`, `browser_click`, `browser_type`, `browser_get_text`, `browser_screenshot`, `browser_close`, `browser_wait`, `browser_select`, `browser_scroll`, `browser_snapshot` |
 | Travel | `flight_search`, `hotel_search` |
 | Reminders | `reminders_list`, `reminders_add`, `reminders_complete`, `reminders_delete` |
 | Calendar | `calendar_list`, `calendar_add`, `calendar_delete` |
 | Notes | `notes_list`, `notes_read`, `notes_create`, `notes_append`, `notes_delete` |
-| Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_send`, `mail_delete`, `mail_junk`, `mail_move`, `mail_move_all` |
+| Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_send`, `mail_draft`, `mail_delete`, `mail_junk`, `mail_move`, `mail_move_all` |
 | Task | `task_init`, `task_step_done`, `task_step_fail` |
 | Scheduler | `schedule_list`, `schedule_add`, `schedule_remove` |
 | News | `daily_briefing` |
@@ -177,6 +177,15 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 ---
 
 ## Development Log
+
+### v1.2 — Web search & draft email
+
+- `web_search` — Google via SerpAPI: a direct answer (when available) plus the
+  top results. Fills wisp's biggest gap (looking up current/unknown info)
+  without clumsy browser driving.
+- `mail_draft` — compose an email/reply and save it to Drafts instead of
+  sending, for review-first workflows. Shares the compose logic with
+  `mail_send` via `_mail_compose_script(action=send|save)`.
 
 ### v1.1 — Scheduler (proactive tasks)
 

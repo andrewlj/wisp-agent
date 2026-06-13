@@ -1650,14 +1650,133 @@ end tell
     return _osascript_clean(script, timeout=90)
 
 
+# Shared JXA snippet: spin the runloop until the async fetch's `done` flips.
+_JXA_SPIN = """
+  var deadline = $.NSDate.dateWithTimeIntervalSinceNow(15);
+  while (!done && $.NSDate.date.compare(deadline) < 0) {
+    $.NSRunLoop.currentRunLoop.runModeBeforeDate($.NSDefaultRunLoopMode,
+      $.NSDate.dateWithTimeIntervalSinceNow(0.05));
+  }
+"""
+
+
+def _reminders_add_eventkit(title, due_dt, notes, list_name):
+    """Fast write via EventKit. Returns the actual list title on success, or
+    None to fall back to AppleScript (list not visible / must be created)."""
+    if due_dt:
+        due_block = (f"var hasDue=true, Y={due_dt.year}, MO={due_dt.month}, "
+                     f"D={due_dt.day}, H={due_dt.hour}, MI={due_dt.minute};")
+    else:
+        due_block = "var hasDue=false, Y=0, MO=0, D=0, H=0, MI=0;"
+    script = f"""
+ObjC.import('EventKit');
+function run() {{
+  var store = $.EKEventStore.alloc.init;
+  var cals = store.calendarsForEntityType($.EKEntityTypeReminder);
+  if (cals.count < 1) return "EK_FALLBACK";
+  var want = {json.dumps(list_name)};
+  var target = null;
+  if (want && want !== "Reminders") {{
+    for (var i = 0; i < cals.count; i++) {{
+      var c = cals.objectAtIndex(i);
+      if (c.title.js === want) target = c;
+    }}
+    if (!target) return "EK_FALLBACK";
+  }} else {{
+    target = store.defaultCalendarForNewReminders;
+  }}
+  var r = $.EKReminder.reminderWithEventStore(store);
+  r.title = {json.dumps(title)};
+  var notes = {json.dumps(notes)}; if (notes) r.notes = notes;
+  r.calendar = target;
+  {due_block}
+  if (hasDue) {{
+    var dc = $.NSDateComponents.alloc.init;
+    dc.year = Y; dc.month = MO; dc.day = D; dc.hour = H; dc.minute = MI;
+    r.dueDateComponents = dc;
+  }}
+  if (!store.saveReminderCommitError(r, true, $())) return "EK_FAIL";
+  return "EK_OK:" + target.title.js;
+}}
+"""
+    raw = _run_jxa(script, timeout=15)
+    if raw.startswith("EK_OK:"):
+        return raw[len("EK_OK:"):].strip()
+    return None  # EK_FALLBACK / EK_FAIL / error → AppleScript path
+
+
+def _reminders_write_eventkit(title, list_name, mode):
+    """Fast complete/delete via EventKit. mode is 'complete' or 'delete'.
+    Returns a result string, or None to fall back to AppleScript."""
+    incomplete_only = "true" if mode == "complete" else "false"
+    if mode == "complete":
+        act = "found.completed = true; var ok = store.saveReminderCommitError(found, true, $());"
+    else:
+        act = "var ok = store.removeReminderCommitError(found, true, $());"
+    pred = ("store.predicateForIncompleteRemindersWithDueDateStartingEndingCalendars($(), $(), useCals)"
+            if mode == "complete"
+            else "store.predicateForRemindersInCalendars(useCals)")
+    script = f"""
+ObjC.import('EventKit'); ObjC.import('Foundation');
+function run() {{
+  var store = $.EKEventStore.alloc.init;
+  var cals = store.calendarsForEntityType($.EKEntityTypeReminder);
+  if (cals.count < 1) return "EK_FALLBACK";
+  var want = {json.dumps(list_name)};
+  var matchedCal = null;
+  for (var i = 0; i < cals.count; i++) {{
+    var c = cals.objectAtIndex(i);
+    if (c.title.js === want) matchedCal = c;
+  }}
+  if (!matchedCal) return "EK_NOLIST";
+  var useCals = $([matchedCal]);
+  var title = {json.dumps(title)};
+  var result = null, done = false;
+  store.fetchRemindersMatchingPredicateCompletion({pred}, function(rems) {{
+    var found = null;
+    for (var i = 0; i < rems.count; i++) {{
+      var r = rems.objectAtIndex(i);
+      var t = r.title ? r.title.js : '';
+      if (t.indexOf(title) >= 0) {{ found = r; break; }}
+    }}
+    if (!found) {{ result = "EK_NOMATCH"; done = true; return; }}
+    {act}
+    result = ok ? "EK_OK" : "EK_FAIL";
+    done = true;
+  }});
+  {_JXA_SPIN}
+  if (!done) return "EK_FALLBACK";
+  return result;
+}}
+"""
+    raw = _run_jxa(script, timeout=20)
+    raw = raw.strip()
+    if raw == "EK_OK":
+        return "ok"
+    if raw == "EK_NOLIST":
+        return f'error: list "{list_name}" not found'
+    if raw == "EK_NOMATCH":
+        verb = "incomplete reminder" if mode == "complete" else "reminder"
+        return f'error: no {verb} matching "{title}" in "{list_name}"'
+    return None  # EK_FALLBACK / EK_FAIL / error → AppleScript
+
+
 def tool_reminders_add(title: str, due: str = "", notes: str = "",
                        list_name: str = "Reminders") -> str:
+    due_dt = _parse_dt(due) if due else None
+    if due and due_dt is None:
+        return f"error: cannot parse due date '{due}' — use YYYY-MM-DD or YYYY-MM-DD HH:MM"
+
+    # Fast path: EventKit (~0.2s vs ~12s for the AppleScript+iCloud write).
+    actual = _reminders_add_eventkit(title, due_dt, notes, list_name)
+    if actual is not None:
+        due_hint = f" (due {due})" if due else ""
+        return f"ok: added reminder '{title}'{due_hint} to '{actual}'"
+
     date_lines = ""
     set_due    = ""
     if due:
-        dt = _parse_dt(due)
-        if dt is None:
-            return f"error: cannot parse due date '{due}' — use YYYY-MM-DD or YYYY-MM-DD HH:MM"
+        dt = due_dt
         date_lines = _as_date_script("dueDate", dt)
         set_due    = "set due date of newReminder to dueDate"
 
@@ -1687,6 +1806,10 @@ return "ok"
 
 def tool_reminders_complete(title: str, list_name: str) -> str:
     """Mark the first matching incomplete reminder as completed."""
+    ek = _reminders_write_eventkit(title, list_name, "complete")
+    if ek is not None:
+        return f"ok: marked '{title}' as completed in '{list_name}'" if ek == "ok" else ek
+
     t = title.replace('"', '\\"')
     l = list_name.replace('"', '\\"')
     script = f"""
@@ -1710,6 +1833,10 @@ end tell
 
 def tool_reminders_delete(title: str, list_name: str) -> str:
     """Permanently delete the first matching reminder."""
+    ek = _reminders_write_eventkit(title, list_name, "delete")
+    if ek is not None:
+        return f"ok: deleted '{title}' from '{list_name}'" if ek == "ok" else ek
+
     t = title.replace('"', '\\"')
     l = list_name.replace('"', '\\"')
     script = f"""

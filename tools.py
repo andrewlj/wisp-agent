@@ -559,6 +559,23 @@ SCHEMAS: list[dict] = [
             "cc":      {"type": "string", "description": "Optional CC address(es), comma-separated."},
         }, ["to", "subject", "body"]),
 
+    _fn("mail_reply",
+        "Reply to an existing email. Mail keeps the thread and quotes the "
+        "original automatically (Re: subject, correct recipient); your `body` is "
+        "placed above the quote. Saves to Drafts for review by default — set "
+        "send=true to send immediately. Identify the original by message_id "
+        "(from mail_list, preferred) or subject.",
+        {
+            "body":       {"type": "string",  "description": "Your reply text (placed above the quoted original)."},
+            "message_id": {"type": "string",  "description": "Original message id from mail_list output (preferred)."},
+            "subject":    {"type": "string",  "description": "Fallback: original subject (partial match)."},
+            "sender":     {"type": "string",  "description": "Optional: original sender to disambiguate."},
+            "account":    {"type": "string",  "description": "Optional: account email to narrow the search."},
+            "mailbox":    {"type": "string",  "description": "Folder the original is in. Default 'INBOX'."},
+            "reply_all":  {"type": "boolean", "description": "Reply to all recipients. Default false."},
+            "send":       {"type": "boolean", "description": "Send immediately. Default false = save to Drafts."},
+        }, ["body"]),
+
     _fn("mail_move_all",
         "Move ALL messages from one folder to another, within each account. "
         "Main use: empty the Trash by moving everything into Junk — macOS Mail "
@@ -3125,6 +3142,53 @@ def tool_mail_draft(to: str, subject: str, body: str,
     if result == "ok":
         frm = f" in {account}" if account else ""
         return f"ok: saved draft '{subject}' to Drafts{frm} — review and send in Mail"
+    return result
+
+
+def tool_mail_reply(body: str, message_id: str = "", subject: str = "",
+                    sender: str = "", account: str = "", mailbox: str = "INBOX",
+                    reply_all: bool = False, send: bool = False) -> str:
+    """Reply to an existing email. Mail handles the Re: subject, recipient, and
+    quoted original; `body` is inserted above the quote. Saves to Drafts by
+    default (send=True to send). Locate the original by message_id or subject."""
+    if not (body or "").strip():
+        return "error: reply body is required"
+    if not (message_id or subject):
+        return "error: identify the original with message_id (preferred) or subject"
+
+    where = _mail_where(subject, sender, message_id)
+    mbox_find = _mail_mbox_find_script(mailbox, account)
+    ra = "true" if reply_all else "false"
+    action = "send r" if send else "save r"
+    s_esc = (message_id or subject).replace('"', '\\"')
+
+    script = f"""
+tell application "Mail"
+    {mbox_find}
+    if (count of foundMboxes) = 0 then
+        return "error: mailbox not found"
+    end if
+    repeat with theMbox in foundMboxes
+        try
+            set msgs to (messages of theMbox {where})
+            if (count of msgs) > 0 then
+                set orig to item 1 of msgs
+                set r to reply orig opening window false reply to all {ra}
+                set content of r to {_osa_str(body)} & return & return & (content of r)
+                {action}
+                return "ok:" & (subject of r)
+            end if
+        end try
+    end repeat
+    return "error: no message found matching \\"{s_esc}\\""
+end tell
+"""
+    result = _osascript_clean(script, timeout=30)
+    if result.startswith("ok:"):
+        re_subj = result[3:].strip()
+        if send:
+            return f"ok: sent reply '{re_subj}'"
+        return f"ok: saved reply '{re_subj}' to Drafts — review and send in Mail"
     return result
 
 

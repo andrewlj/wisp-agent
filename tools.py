@@ -528,6 +528,18 @@ SCHEMAS: list[dict] = [
             "target_mailbox": {"type": "string", "description": "Target: 'junk', 'trash', 'archive', or a literal folder name."},
         }, ["target_mailbox"]),
 
+    _fn("mail_move_all",
+        "Move ALL messages from one folder to another, within each account. "
+        "Main use: empty the Trash by moving everything into Junk — macOS Mail "
+        "often can't empty an IMAP Trash, but Junk can be emptied manually. "
+        "Reversible (a move, not a permanent delete). Folders resolve per account "
+        "across languages. Omit account to apply to every account.",
+        {
+            "source_mailbox": {"type": "string", "description": "Folder to empty, e.g. 'trash'/'废纸篓'/'已删除邮件'."},
+            "target_mailbox": {"type": "string", "description": "Destination, e.g. 'junk'/'垃圾邮件'."},
+            "account":        {"type": "string", "description": "Optional: limit to one account email. Omit to apply to all accounts."},
+        }, ["source_mailbox", "target_mailbox"]),
+
     # ── Daily briefing ────────────────────────────────────────────────────────
     _fn("daily_briefing",
         "Generate today's global news briefing as an HTML report. "
@@ -2492,6 +2504,72 @@ def tool_mail_junk(subject: str = "", sender: str = "", account: str = "",
     )
 
 
+def tool_mail_move_all(source_mailbox: str, target_mailbox: str,
+                       account: str = "") -> str:
+    """Move ALL messages from one folder to another, within each account.
+
+    Primary use: clear the Trash by moving everything into Junk (macOS Mail
+    can't always empty an IMAP Trash, but Junk can be emptied manually).
+    Reversible — this is a move, not a permanent delete. Source and target are
+    resolved per account via locale aliases (trash/junk/已删除邮件/垃圾邮件 …),
+    and the move always stays within the same account.
+    """
+    if not source_mailbox or not target_mailbox:
+        return "error: source_mailbox and target_mailbox are required"
+    if _mbox_candidates(source_mailbox) == _mbox_candidates(target_mailbox):
+        return "error: source and target resolve to the same folder"
+
+    def _clause(names: list[str]) -> str:
+        return " or ".join(
+            f'name is "{n.replace(chr(34), chr(92) + chr(34))}"' for n in names
+        )
+
+    src_clause = _clause(_mbox_candidates(source_mailbox))
+    tgt_clause = _clause(_mbox_candidates(target_mailbox))
+
+    if account:
+        a = account.replace('"', '\\"')
+        acc_guard = f'if accUser is not "{a}" then\n            -- skip\n        else'
+        acc_guard_end = "end if"
+    else:
+        acc_guard = ""
+        acc_guard_end = ""
+
+    script = f"""
+tell application "Mail"
+    set output to ""
+    set grandTotal to 0
+    repeat with acc in (every account)
+        set accUser to ""
+        try
+            set accUser to user name of acc
+        end try
+        {acc_guard}
+        try
+            -- Resolve source/target via inline `whose` specifiers (never hold a
+            -- mailbox reference across the move — it invalidates after mutation)
+            set srcM to (first mailbox of acc whose {src_clause})
+            set tgtM to (first mailbox of acc whose {tgt_clause})
+            set n to count of messages of srcM
+            if n > 0 then
+                move (messages of srcM) to tgtM
+                set output to output & accUser & ": moved " & n & " message(s)" & "\\n"
+                set grandTotal to grandTotal + n
+            else
+                set output to output & accUser & ": trash already empty" & "\\n"
+            end if
+        on error errMsg
+            set output to output & accUser & ": skipped (" & errMsg & ")" & "\\n"
+        end try
+        {acc_guard_end}
+    end repeat
+    if output is "" then return "no matching accounts"
+    return output & "total moved: " & grandTotal
+end tell
+"""
+    return _osascript_clean(script, timeout=120)
+
+
 # ── Daily briefing ───────────────────────────────────────────────────────────
 
 def tool_daily_briefing(open_browser: bool = True,
@@ -2602,4 +2680,5 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         case "mail_delete":  return tool_mail_delete(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
         case "mail_junk":    return tool_mail_junk(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
         case "mail_move":    return tool_mail_move(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("source_mailbox", "INBOX"), args["target_mailbox"], args.get("message_id", ""))
+        case "mail_move_all": return tool_mail_move_all(args["source_mailbox"], args["target_mailbox"], args.get("account", ""))
         case _:              return f"error: unknown tool '{name}'"

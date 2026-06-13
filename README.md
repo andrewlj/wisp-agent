@@ -100,7 +100,7 @@ python agent.py "Count how many files are on my Desktop"
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (43 total)
+## Tools (54 total)
 
 | Category | Tools |
 |----------|-------|
@@ -108,12 +108,12 @@ python agent.py "Count how many files are on my Desktop"
 | Mac system | `screenshot`, `osascript`, `clipboard_read/write`, `open`, `list_apps`, `focus_app`, `quit_app` |
 | File ops | `find_files`, `move_file`, `copy_file`, `delete_file` |
 | Network | `http_get`, `http_post` |
-| Browser | `browser_open`, `browser_click`, `browser_type`, `browser_get_text`, `browser_screenshot`, `browser_close` |
-| Reminders | `reminders_list`, `reminders_add` |
-| Calendar | `calendar_list`, `calendar_add` |
-| Notes | `notes_list`, `notes_read`, `notes_create`, `notes_append` |
-| Browser+ | `browser_wait`, `browser_select`, `browser_scroll`, `browser_snapshot` |
+| Browser | `browser_open`, `browser_click`, `browser_type`, `browser_get_text`, `browser_screenshot`, `browser_close`, `browser_wait`, `browser_select`, `browser_scroll`, `browser_snapshot` |
 | Travel | `flight_search`, `hotel_search` |
+| Reminders | `reminders_list`, `reminders_add`, `reminders_complete`, `reminders_delete` |
+| Calendar | `calendar_list`, `calendar_add`, `calendar_delete` |
+| Notes | `notes_list`, `notes_read`, `notes_create`, `notes_append`, `notes_delete` |
+| Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_delete`, `mail_junk`, `mail_move`, `mail_move_all` |
 | Task | `task_init`, `task_step_done`, `task_step_fail` |
 | News | `daily_briefing` |
 | Learn | `learn` |
@@ -173,6 +173,50 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 ---
 
 ## Development Log
+
+### v0.9 — Mail Management & Context Auto-Compression
+
+**Mail tools (new)** — full macOS Mail.app integration over AppleScript, working
+across multiple accounts (Gmail, Hotmail/Outlook, iCloud) in mixed languages:
+- `mail_accounts()` — list configured accounts
+- `mail_list(account, mailbox, limit, unread_only)` — list messages; each line
+  ends with `id:<message-id>` for reliable follow-up actions
+- `mail_read(message_id | subject, …)` — read full body
+- `mail_delete(message_id | subject, …)` — move to Trash (recoverable)
+- `mail_junk(message_id | subject, …)` — mark as spam (move to Junk)
+- `mail_move(message_id | subject, target_mailbox, …)` — move with semantic
+  target aliases (`junk`/`trash`/`archive`); refuses misfiling into Drafts/Sent
+- `mail_move_all(source_mailbox, target_mailbox, account)` — bulk-move a whole
+  folder; clears an un-emptyable IMAP Trash by moving it into Junk
+
+**AppleScript robustness (macOS 26)**
+- `inbox of account` is broken even for `imap account` subtypes, and app-level
+  `every mailbox` only returns system folders. All tools now traverse
+  `every account → mailboxes of acc` instead.
+- **Locale folder resolution** — `INBOX`/`Sent`/`Junk`/`Trash`/`Archive`/`Drafts`
+  resolve to each account's actual folder whether named in English or Chinese
+  (收件箱/已发送邮件/垃圾邮件/已删除邮件/存档/草稿); custom folders match literally.
+- **Locate by message-id** — operations target `whose message id is …` instead
+  of brittle subject-substring matching (a stray space or emoji used to break it).
+- Never holds a mailbox specifier across a move (it invalidates after the
+  mutation → error -1728); source/target are re-resolved inline.
+
+**Context auto-compression (fix)**
+- Compression ran only once per task, before the turn loop — so long tool-heavy
+  loops (e.g. processing many emails) grew context unbounded until the model
+  limit was hit. Now checked every turn.
+- Compressed output could break the API: a mid-list `system` summary violates
+  strict chat templates (→ 400), and the summary boundary could orphan tool
+  results. Summary is now a `user`-role message, and `_sanitize_tool_pairing`
+  guarantees every `tool` message has a declaring assistant and every
+  `tool_calls` entry has a reply.
+
+**Other tool improvements**
+- `reminders_list` — `due_before`/range filter, clearer output; new
+  `reminders_complete` / `reminders_delete`
+- `calendar_delete`, `notes_delete`
+- `flight_search` — resolves city names / city codes to airport codes, with
+  dynamic KGMID lookup so multi-airport cities are covered
 
 ### v0.8 — Travel via SerpAPI, Terminal Fixes
 

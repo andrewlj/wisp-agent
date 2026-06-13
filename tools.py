@@ -1647,8 +1647,8 @@ end tell
 # default — a single one can cost 10-15s. Matched as case-insensitive substrings.
 # Querying a specific calendar by name bypasses this list.
 _CAL_SKIP_PATTERNS = [
-    "农历", "lunar", "Siri", "建议", "suggestion", "计划的提醒事项",
-    "scheduled reminders", "提醒事项",
+    "农历", "lunar", "Siri", "建议", "suggestion",
+    "计划的提醒事项", "scheduled reminders",
 ]
 
 

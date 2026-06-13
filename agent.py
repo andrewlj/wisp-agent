@@ -630,6 +630,47 @@ def run_turn(messages: list, turn: int = 0, max_turns: int = 0,
 
 # ── Context Compression ───────────────────────────────────────────────────────
 
+def _sanitize_tool_pairing(messages: list) -> None:
+    """Repair tool-call pairing in-place so the message list is always valid.
+
+    Two invariants the API enforces:
+    - every `tool` message must follow an assistant that declared its
+      `tool_call_id`;
+    - every assistant `tool_calls` entry must have a matching `tool` reply.
+
+    Compression can break either at the summary boundary. Drop orphaned tool
+    messages, then strip unanswered tool_calls from assistant messages.
+    """
+    # Pass 1: drop tool messages whose call was never declared earlier
+    declared: set[str] = set()
+    kept: list[dict] = []
+    for m in messages:
+        if m.get("role") == "assistant":
+            for tc in m.get("tool_calls", []):
+                declared.add(tc.get("id"))
+            kept.append(m)
+        elif m.get("role") == "tool":
+            if m.get("tool_call_id") in declared:
+                kept.append(m)
+            # else: orphaned result — drop it
+        else:
+            kept.append(m)
+
+    # Pass 2: strip assistant tool_calls that have no answering tool message
+    answered = {m.get("tool_call_id") for m in kept if m.get("role") == "tool"}
+    for m in kept:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            live = [tc for tc in m["tool_calls"] if tc.get("id") in answered]
+            if live:
+                m["tool_calls"] = live
+            else:
+                m.pop("tool_calls", None)
+                if not m.get("content"):
+                    m["content"] = ""
+
+    messages[:] = kept
+
+
 def _estimate_tokens(messages: list) -> int:
     """Rough token estimate: total chars / 4."""
     total = 0
@@ -767,13 +808,24 @@ def _maybe_compress(messages: list) -> None:
         print(f"  {_rgb(200,80,80)}context compression failed: {e}{C.RESET}")
         return
 
-    summary_msg = {
-        "role":    "system",
-        "content": f"[Conversation Summary — earlier context compressed]\n{summary_text}",
-    }
+    summary_body = f"[Conversation Summary — earlier context compressed]\n{summary_text}"
 
-    # Replace messages in-place: system + summary + recent
-    messages[1:cut] = [summary_msg]
+    # Use a `user`-role summary, not `system`. A second system message mid-list
+    # breaks strict chat templates (Qwen/Llama/Mistral) and 400s the server.
+    # If the kept-recent block also starts with a user message, merge to avoid
+    # two consecutive user turns (also rejected by some templates).
+    tail = messages[cut:]
+    if tail and tail[0].get("role") == "user":
+        merged = dict(tail[0])
+        existing = merged.get("content") or ""
+        if isinstance(existing, list):
+            existing = " ".join(p.get("text", "") for p in existing if isinstance(p, dict))
+        merged["content"] = summary_body + "\n\n" + str(existing)
+        messages[1:cut + 1] = [merged]
+    else:
+        messages[1:cut] = [{"role": "user", "content": summary_body}]
+
+    _sanitize_tool_pairing(messages)
     after = len(messages)
     print(f"  {_rgb(90,60,180)}→{C.RESET} {C.DIM}{_rgb(150,120,220)}"
           f"context compressed: {before} → {after} messages{C.RESET}")

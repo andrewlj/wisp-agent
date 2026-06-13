@@ -1641,6 +1641,17 @@ end tell
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
+# Calendars that are not real schedule events but are catastrophically slow to
+# query in Calendar.app AppleScript (recurrence/lunar expansion over all time):
+# lunar-date annotations, Siri suggestions, and the Reminders mirror. Skipped by
+# default — a single one can cost 10-15s. Matched as case-insensitive substrings.
+# Querying a specific calendar by name bypasses this list.
+_CAL_SKIP_PATTERNS = [
+    "农历", "lunar", "Siri", "建议", "suggestion", "计划的提醒事项",
+    "scheduled reminders", "提醒事项",
+]
+
+
 def tool_calendar_list(days: int = 7, calendar_name: str = "") -> str:
     if calendar_name:
         cal_clause = f'{{calendar "{calendar_name}"}}'
@@ -1649,13 +1660,17 @@ def tool_calendar_list(days: int = 7, calendar_name: str = "") -> str:
             f'    return "error: calendar \\"{calendar_name}\\" not found"\n'
             f'end if\n'
         )
+        skip_setup = "set skipPatterns to {}\n"
     else:
         cal_clause = "every calendar"
         guard = ""
+        pats = ", ".join('"' + p.replace('"', '\\"') + '"' for p in _CAL_SKIP_PATTERNS)
+        skip_setup = f"set skipPatterns to {{{pats}}}\n"
 
     script = f"""
 tell application "Calendar"
     {guard}
+    {skip_setup}
     set startDate to current date
     set time of startDate to 0
     set endDate to startDate + ({days} * days)
@@ -1663,6 +1678,12 @@ tell application "Calendar"
     set output to ""
     set counter to 0
     repeat with cal in theCals
+        set calName to name of cal
+        set skipThis to false
+        repeat with pat in skipPatterns
+            if calName contains pat then set skipThis to true
+        end repeat
+        if not skipThis then
         try
             set theEvents to (every event of cal whose start date >= startDate and start date < endDate)
             repeat with e in theEvents
@@ -1684,6 +1705,7 @@ tell application "Calendar"
                 end if
             end repeat
         end try
+        end if
     end repeat
     if output is "" then return "no upcoming events in the next {days} days"
     return output

@@ -15,7 +15,7 @@ import yaml
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 
-from tools import SCHEMAS, dispatch
+from tools import SCHEMAS, dispatch, active_schemas
 import session as _session
 import task as _task
 
@@ -45,6 +45,10 @@ STRICT          = _cfg["agent"].get("strict_workspace", True)
 CTX_LIMIT       = _cfg["agent"].get("context_limit", 6000)
 CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
 BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
+DISABLED_TOOL_GROUPS = _cfg["agent"].get("disabled_tool_groups", []) or []
+
+# Tool menu actually sent to the model — trimmed by config for small models.
+SCHEMAS_ACTIVE  = active_schemas(DISABLED_TOOL_GROUPS)
 
 # Initialise workspace sandbox, browser timeout, and briefing LLM config
 from tools import init_workspace, init_browser_timeout, init_serpapi
@@ -341,7 +345,7 @@ def print_banner() -> None:
     meta_c   = _rgb(0, 165, 178)
     W        = _PANEL_W
 
-    n_tools = len(SCHEMAS)
+    n_tools = len(SCHEMAS_ACTIVE)
     from datetime import datetime
     today = datetime.now().strftime("%Y.%-m.%-d")
 
@@ -437,7 +441,7 @@ def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
     resp = _llm_post({
         "model":       MODEL,
         "messages":    messages,
-        "tools":       SCHEMAS,
+        "tools":       SCHEMAS_ACTIVE,
         "tool_choice": "auto",
         "max_tokens":  MAX_TOKENS,
         "stream":      True,

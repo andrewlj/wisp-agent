@@ -15,6 +15,11 @@ agent:
   strict_workspace: true            # block writes/deletes outside workspace
   context_limit: 6000               # estimated tokens before compression kicks in
   context_keep_recent: 6            # number of recent messages to keep verbatim
+  # Trim the tool menu sent to the model — fewer tools = better selection on
+  # small (e.g. 9B) models. `core` (bash/read_file/write_file/done) is always on.
+  # Groups: system files network browser travel reminders calendar notes mail
+  #         task news learn
+  disabled_tool_groups: []          # e.g. [browser, travel, network] to drop 14 tools
 
 # Optional: SerpAPI key for flight_search and hotel_search tools.
 # Sign up free at https://serpapi.com/users/sign_up (100 searches/month free).

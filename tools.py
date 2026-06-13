@@ -330,15 +330,11 @@ SCHEMAS: list[dict] = [
 
     # ── Travel search ──────────────────────────────────────────────────────────
     _fn("flight_search",
-        "Search for flights via SerpAPI Google Flights (structured JSON API). "
-        "Returns airline names, departure/arrival times, duration, stops, and prices. "
-        "Covers all major and budget airlines including European low-cost carriers "
-        "(Ryanair, easyJet, Wizz Air, etc.). City names are resolved automatically "
-        "via Google's Knowledge Graph and a single search covers ALL airports for "
-        "multi-airport cities (Paris → CDG+ORY+BVA, London → LHR+LGW+STN+LTN, etc).",
+        "Search flights (Google Flights). Returns airlines, times, duration, "
+        "stops, and prices. City names auto-resolve to all of a city's airports.",
         {
-            "origin":      {"type": "string",  "description": "Departure: city name in any language ('Paris', '巴黎', '都柏林'), city code ('PAR'), or specific airport code ('CDG'). City names cover all of that city's airports."},
-            "destination": {"type": "string",  "description": "Arrival: city name in any language ('London', '伦敦'), city code ('LON'), or specific airport code ('LHR'). City names cover all of that city's airports."},
+            "origin":      {"type": "string",  "description": "Departure city or airport: 'Paris'/'巴黎'/'PAR'/'CDG'."},
+            "destination": {"type": "string",  "description": "Arrival city or airport: 'London'/'伦敦'/'LON'/'LHR'."},
             "date":        {"type": "string",  "description": "Departure date YYYY-MM-DD"},
             "return_date": {"type": "string",  "description": "Return date YYYY-MM-DD for round-trip. Omit for one-way."},
             "passengers":  {"type": "integer", "description": "Number of passengers. Default 1."},
@@ -2663,3 +2659,44 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         return func(**kwargs)
     except Exception as e:
         return f"error: tool '{name}' failed: {e}"
+
+
+# ── Tool groups (for trimming the menu on small models) ──────────────────────
+
+# core is always active and cannot be disabled.
+_TOOL_GROUP_CORE = {"bash", "read_file", "write_file", "done"}
+
+
+def _group_of(name: str) -> str:
+    """Classify a tool into a group used by config-driven enable/disable."""
+    if name in _TOOL_GROUP_CORE:
+        return "core"
+    for prefix, group in (
+        ("browser_", "browser"), ("reminders_", "reminders"),
+        ("calendar_", "calendar"), ("notes_", "notes"), ("mail_", "mail"),
+        ("task_", "task"), ("clipboard_", "system"),
+    ):
+        if name.startswith(prefix):
+            return group
+    return {
+        "screenshot": "system", "osascript": "system", "open": "system",
+        "list_apps": "system", "focus_app": "system", "quit_app": "system",
+        "find_files": "files", "move_file": "files", "copy_file": "files",
+        "delete_file": "files",
+        "http_get": "network", "http_post": "network",
+        "flight_search": "travel", "hotel_search": "travel",
+        "daily_briefing": "news", "learn": "learn",
+    }.get(name, "misc")
+
+
+def active_schemas(disabled_groups) -> list[dict]:
+    """Return SCHEMAS with the named groups removed. `core` is always kept.
+
+    Lets a deployment on a small model trim the tool menu (e.g. drop browser +
+    travel) deterministically, with no extra routing LLM call.
+    """
+    disabled = {g for g in (disabled_groups or ()) if g != "core"}
+    if not disabled:
+        return SCHEMAS
+    return [sc for sc in SCHEMAS
+            if _group_of(sc["function"]["name"]) not in disabled]

@@ -2064,8 +2064,80 @@ return "ok"
     return result
 
 
+def _calendar_delete_eventkit(title, start_dt, calendar_name):
+    """Fast delete via EventKit. Returns 'ok' / 'error: ...' / None (fall back).
+    When start_dt is given, only an event starting within ±2 min matches, so
+    same-title events at different times aren't deleted by mistake."""
+    if start_dt:
+        se = start_dt.timestamp()
+        window = f"var hasStart=true, startE={se};"
+    else:
+        window = "var hasStart=false, startE=0;"
+    script = f"""
+ObjC.import('EventKit'); ObjC.import('Foundation');
+function run() {{
+  var store = $.EKEventStore.alloc.init;
+  var cals = store.calendarsForEntityType($.EKEntityTypeEvent);
+  if (cals.count <= 1) return "EK_FALLBACK";
+  var want = {json.dumps(calendar_name)};
+  var useCals = cals;
+  if (want) {{
+    var matched = [];
+    for (var i = 0; i < cals.count; i++) {{
+      var c = cals.objectAtIndex(i);
+      if (c.title.js === want) matched.push(c);
+    }}
+    if (matched.length === 0) return "EK_NOCAL";
+    useCals = $(matched);
+  }}
+  {window}
+  var sd, ed;
+  if (hasStart) {{
+    sd = $.NSDate.dateWithTimeIntervalSince1970(startE - 86400);
+    ed = $.NSDate.dateWithTimeIntervalSince1970(startE + 86400);
+  }} else {{
+    var now = $.NSDate.date;
+    sd = now.dateByAddingTimeInterval(-365 * 86400);
+    ed = now.dateByAddingTimeInterval(365 * 86400);
+  }}
+  var pred = store.predicateForEventsWithStartDateEndDateCalendars(sd, ed, useCals);
+  var evs = store.eventsMatchingPredicate(pred);
+  var title = {json.dumps(title)};
+  var target = null;
+  for (var i = 0; i < evs.count; i++) {{
+    var e = evs.objectAtIndex(i);
+    var s = e.title ? e.title.js : '';
+    if (s.indexOf(title) < 0) continue;
+    if (hasStart && Math.abs(e.startDate.timeIntervalSince1970 - startE) > 120) continue;
+    target = e; break;
+  }}
+  if (!target) return "EK_NOMATCH";
+  if (!store.removeEventSpanCommitError(target, $.EKSpanThisEvent, true, $())) return "EK_FAIL";
+  return "EK_OK";
+}}
+"""
+    raw = _run_jxa(script, timeout=15).strip()
+    if raw == "EK_OK":
+        return "ok"
+    if raw == "EK_NOCAL":
+        return f'error: calendar "{calendar_name}" not found'
+    if raw == "EK_NOMATCH":
+        return f'error: no event found matching "{title}"'
+    return None  # EK_FALLBACK / EK_FAIL / error → AppleScript
+
+
 def tool_calendar_delete(title: str, start: str = "", calendar_name: str = "") -> str:
     """Delete the first calendar event matching title (+ optional start date)."""
+    start_dt = None
+    if start:
+        start_dt = _parse_dt(start)
+        if start_dt is None:
+            return f"error: cannot parse start '{start}' — use YYYY-MM-DD or YYYY-MM-DD HH:MM"
+
+    ek = _calendar_delete_eventkit(title, start_dt, calendar_name)
+    if ek is not None:
+        return f"ok: deleted event '{title}'" if ek == "ok" else ek
+
     t = title.replace('"', '\\"')
 
     # Optional start-date filter: compute a narrow time window (±1 min)

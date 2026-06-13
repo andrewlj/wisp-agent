@@ -472,7 +472,7 @@ SCHEMAS: list[dict] = [
         "Use unread_only=true to fetch only new emails.",
         {
             "account":     {"type": "string",  "description": "Filter by account email address (e.g. 'john@gmail.com'). Omit to list all configured accounts."},
-            "mailbox":     {"type": "string",  "description": "Folder name. Default: 'INBOX'. Others: 'Sent', 'Junk', 'Archive', 'Drafts'."},
+            "mailbox":     {"type": "string",  "description": "Folder. Default 'INBOX'. Aliases resolve across languages: 'INBOX'/'Sent'/'Junk'/'Trash'/'Archive'/'Drafts' match the account's folder whether it's named in English or Chinese (已发送邮件/垃圾邮件/已删除邮件/存档/草稿). Custom folders match by literal name."},
             "limit":       {"type": "integer", "description": "Max messages to return. Default 20."},
             "unread_only": {"type": "boolean", "description": "If true, only return unread messages. Default false."},
         }, []),
@@ -2020,20 +2020,6 @@ end tell
 # Mail.app must be running; accounts are whatever is configured in the app.
 # mail_delete moves to Trash (recoverable); no permanent-delete tool is provided.
 
-def _mail_acc_script(account: str) -> str:
-    """AppleScript lines to set `theAccounts` to all accounts or a specific one."""
-    if account:
-        a = account.replace('"', '\\"')
-        return (
-            # Match against both email addresses list and user name (login field)
-            f'set theAccounts to (every account whose email addresses contains "{a}" or user name is "{a}")\n'
-            f'if (count of theAccounts) = 0 then\n'
-            f'    return "error: no Mail account found for \\"{a}\\""\n'
-            f'end if\n'
-        )
-    return "set theAccounts to every account\n"
-
-
 def _mail_where(subject: str = "", sender: str = "", message_id: str = "") -> str:
     """AppleScript whose-clause for locating a message.
 
@@ -2070,6 +2056,16 @@ _MBOX_ARCHIVE_NAMES = [
     "Archive", "Archived", "存档", "归档", "封存",
     "All Mail", "所有邮件", "所有郵件",
 ]
+_MBOX_INBOX_NAMES = [
+    "INBOX", "Inbox", "inbox", "收件箱", "收件匣", "受信トレイ", "Posteingang",
+]
+_MBOX_SENT_NAMES = [
+    "Sent", "Sent Mail", "Sent Messages", "Sent Items",
+    "已发送邮件", "已发邮件", "已发送", "已寄郵件", "寄件備份", "寄件備份匣",
+]
+_MBOX_DRAFTS_NAMES = [
+    "Drafts", "Draft", "草稿", "草稿箱", "草稿邮件", "草稿匣",
+]
 # Aliases the user/agent may type → canonical category
 _MBOX_ALIAS = {
     "junk": "junk", "spam": "junk", "垃圾": "junk", "垃圾箱": "junk",
@@ -2080,6 +2076,38 @@ _MBOX_ALIAS = {
     "归档": "archive", "封存": "archive", "all mail": "archive",
     "所有邮件": "archive",
 }
+# Source-side aliases (for reading FROM a folder). Unlike _MBOX_ALIAS, these
+# include inbox/sent/drafts — folders you can read but should not be a move
+# *target* for inbound cleanup.
+_MBOX_SOURCE_ALIAS = {
+    **{k: v for k, v in _MBOX_ALIAS.items()},
+    "inbox": "inbox", "收件箱": "inbox", "收件匣": "inbox",
+    "sent": "sent", "sent mail": "sent", "已发送邮件": "sent",
+    "已发邮件": "sent", "已发送": "sent",
+    "drafts": "drafts", "draft": "drafts", "草稿": "drafts", "草稿箱": "drafts",
+}
+_MBOX_CATEGORY_NAMES = {
+    "inbox": _MBOX_INBOX_NAMES,
+    "junk": _MBOX_JUNK_NAMES,
+    "trash": _MBOX_TRASH_NAMES,
+    "archive": _MBOX_ARCHIVE_NAMES,
+    "sent": _MBOX_SENT_NAMES,
+    "drafts": _MBOX_DRAFTS_NAMES,
+}
+
+
+def _mbox_candidates(name: str) -> list[str]:
+    """Resolve a mailbox name/alias to the list of locale folder names to match.
+
+    Maps inbox/junk/trash/archive/sent/drafts (in English or Chinese) to their
+    per-locale candidate names; falls back to the literal name for custom
+    folders. Lets every mail tool accept 'Sent'/'Junk'/'已发送邮件' etc.
+    interchangeably regardless of the account's display language.
+    """
+    cat = _MBOX_SOURCE_ALIAS.get(name.strip().lower())
+    if cat:
+        return _MBOX_CATEGORY_NAMES[cat]
+    return [name]
 # Targets that never make sense as a move destination for inbound cleanup
 _MBOX_FORBIDDEN = {
     "drafts", "草稿", "草稿箱", "outbox", "发件箱", "sendlater",
@@ -2148,17 +2176,16 @@ def _mail_mbox_find_script(mailbox: str, account: str = "") -> str:
     - ``every mailbox`` at app level only returns system mailboxes (Outbox, Drafts)
     - ``mailboxes of acc`` reliably lists all per-account mailboxes
 
-    For INBOX we match several locale names (INBOX / Inbox / 收件箱 / …).
-    Only one inbox per account is collected (exit repeat after first match).
+    The mailbox name/alias is resolved to locale candidate names via
+    _mbox_candidates, so 'INBOX'/'Sent'/'Junk'/'已发送邮件' all match regardless
+    of the account's display language. One mailbox per account is collected
+    (exit repeat after first match).
     """
-    if mailbox.upper() == "INBOX":
-        name_check = (
-            'mbName is "INBOX" or mbName is "Inbox" or mbName is "inbox" '
-            'or mbName is "收件箱" or mbName is "受信トレイ" or mbName is "Posteingang"'
-        )
-    else:
-        mbox_esc = mailbox.replace('"', '\\"')
-        name_check = f'mbName is "{mbox_esc}"'
+    cands = _mbox_candidates(mailbox)
+    checks = " or ".join(
+        f'mbName is "{c.replace(chr(34), chr(92) + chr(34))}"' for c in cands
+    )
+    name_check = checks if checks else "false"
 
     if account:
         a = account.replace('"', '\\"')

@@ -466,7 +466,9 @@ SCHEMAS: list[dict] = [
     _fn("mail_list",
         "List emails from macOS Mail.app. Works across all configured accounts "
         "(Gmail, Hotmail, iCloud, etc.) or a specific account. "
-        "Returns sender, subject, date, and read/unread status for each message. "
+        "Each line ends with 'id:<message-id>' — pass that exact id as message_id "
+        "to mail_read/mail_delete/mail_move/mail_junk to act on the message reliably "
+        "(do NOT retype the subject, which often fails to match). "
         "Use unread_only=true to fetch only new emails.",
         {
             "account":     {"type": "string",  "description": "Filter by account email address (e.g. 'john@gmail.com'). Omit to list all configured accounts."},
@@ -477,33 +479,53 @@ SCHEMAS: list[dict] = [
 
     _fn("mail_read",
         "Read the full content of an email from macOS Mail.app. "
-        "Returns sender, date, subject, and body text (truncated to 3000 chars).",
+        "Returns sender, date, subject, and body text (truncated to 3000 chars). "
+        "Prefer message_id (from mail_list) to locate the message.",
         {
-            "subject": {"type": "string", "description": "Email subject (exact or partial match)."},
+            "message_id": {"type": "string", "description": "Exact message id from mail_list output (preferred — reliable). Use this instead of subject when available."},
+            "subject": {"type": "string", "description": "Fallback: email subject (partial match). Brittle — use message_id when possible."},
             "sender":  {"type": "string", "description": "Optional: sender address or name to disambiguate."},
             "account": {"type": "string", "description": "Optional: account email address to narrow the search."},
             "mailbox": {"type": "string", "description": "Folder to search. Default: 'INBOX'."},
-        }, ["subject"]),
+        }, []),
 
     _fn("mail_delete",
         "Move an email to Trash in macOS Mail.app. Safe delete — recoverable from Trash. "
-        "Always prefer this over permanent deletion.",
+        "Prefer message_id (from mail_list) to locate the message.",
         {
-            "subject": {"type": "string", "description": "Email subject (exact or partial match)."},
+            "message_id": {"type": "string", "description": "Exact message id from mail_list output (preferred — reliable)."},
+            "subject": {"type": "string", "description": "Fallback: email subject (partial match). Brittle — use message_id when possible."},
             "sender":  {"type": "string", "description": "Optional: sender to narrow the match."},
             "account": {"type": "string", "description": "Optional: account email address."},
             "mailbox": {"type": "string", "description": "Source folder. Default: 'INBOX'."},
-        }, ["subject"]),
+        }, []),
+
+    _fn("mail_junk",
+        "Mark an email as junk/spam — moves it to the account's Junk folder so the "
+        "provider learns to filter similar mail. Use this for ads and promotional spam. "
+        "Prefer message_id (from mail_list) to locate the message.",
+        {
+            "message_id": {"type": "string", "description": "Exact message id from mail_list output (preferred — reliable)."},
+            "subject": {"type": "string", "description": "Fallback: email subject (partial match). Brittle — use message_id when possible."},
+            "sender":  {"type": "string", "description": "Optional: sender to narrow the match."},
+            "account": {"type": "string", "description": "Optional: account email address."},
+            "mailbox": {"type": "string", "description": "Source folder. Default: 'INBOX'."},
+        }, []),
 
     _fn("mail_move",
-        "Move an email to another folder/mailbox in macOS Mail.app.",
+        "Move an email to another folder in macOS Mail.app. target_mailbox accepts "
+        "semantic aliases: 'junk'/'spam'/'垃圾邮件' → the account's Junk folder; "
+        "'trash'/'废纸篓'/'已删除' → Trash; or a literal folder name like 'Archive'. "
+        "Moving inbound mail into Drafts/Outbox/Sent is refused. "
+        "Prefer message_id (from mail_list) to locate the message.",
         {
-            "subject":        {"type": "string", "description": "Email subject (exact or partial match)."},
+            "message_id":     {"type": "string", "description": "Exact message id from mail_list output (preferred — reliable)."},
+            "subject":        {"type": "string", "description": "Fallback: email subject (partial match). Brittle — use message_id when possible."},
             "sender":         {"type": "string", "description": "Optional: sender to narrow the match."},
             "account":        {"type": "string", "description": "Optional: account email address."},
             "source_mailbox": {"type": "string", "description": "Source folder. Default: 'INBOX'."},
-            "target_mailbox": {"type": "string", "description": "Target folder, e.g. 'Junk', 'Archive'."},
-        }, ["subject", "target_mailbox"]),
+            "target_mailbox": {"type": "string", "description": "Target: 'junk', 'trash', 'Archive', or a folder name."},
+        }, ["target_mailbox"]),
 
     # ── Daily briefing ────────────────────────────────────────────────────────
     _fn("daily_briefing",
@@ -2011,13 +2033,53 @@ def _mail_acc_script(account: str) -> str:
     return "set theAccounts to every account\n"
 
 
-def _mail_where(subject: str, sender: str) -> str:
-    """AppleScript whose-clause filtering by subject and optional sender."""
+def _mail_where(subject: str = "", sender: str = "", message_id: str = "") -> str:
+    """AppleScript whose-clause for locating a message.
+
+    Prefers `message id` (exact, stable RFC Message-ID) when provided; this is
+    the reliable primary key. Falls back to subject/sender substring matching,
+    which is brittle (whitespace/emoji differences break it) but kept as a
+    convenience when no id is available.
+    """
+    if message_id:
+        mid = message_id.replace('"', '\\"')
+        return f'whose message id is "{mid}"'
     s = subject.replace('"', '\\"')
     if sender:
         snd = sender.replace('"', '\\"')
         return f'whose subject contains "{s}" and sender contains "{snd}"'
     return f'whose subject contains "{s}"'
+
+
+# Semantic mailbox resolution — provider folder names differ per account and
+# locale. mail_move resolves these aliases to the right folder within the
+# message's own account, rather than requiring an exact name match.
+_MBOX_JUNK_NAMES = [
+    "Junk", "Spam", "Junk E-mail", "Junk Email", "Bulk Mail",
+    "垃圾邮件", "垃圾箱", "垃圾郵件",
+]
+_MBOX_TRASH_NAMES = [
+    "Trash", "Deleted Messages", "Deleted Items", "Bin",
+    "已删除邮件", "已删除", "废纸篓", "已刪除郵件",
+]
+# Aliases the user/agent may type → canonical category
+_MBOX_ALIAS = {
+    "junk": "junk", "spam": "junk", "垃圾": "junk", "垃圾箱": "junk",
+    "垃圾邮件": "junk", "广告": "junk",
+    "trash": "trash", "bin": "trash", "废纸篓": "trash", "删除": "trash",
+    "已删除": "trash", "已删除邮件": "trash", "回收站": "trash",
+}
+# Targets that never make sense as a move destination for inbound cleanup
+_MBOX_FORBIDDEN = {
+    "drafts", "草稿", "草稿箱", "outbox", "发件箱", "sendlater",
+    "sent", "sent mail", "已发送邮件", "已发邮件",
+}
+
+
+def _mbox_category(target: str) -> str | None:
+    """Map a user-supplied target name to 'junk'/'trash', or None if literal."""
+    t = target.strip().lower()
+    return _MBOX_ALIAS.get(t)
 
 
 # AppleScript snippet: formats `msgDate` → `dateStr` (YYYY-MM-DD HH:MM)
@@ -2165,13 +2227,17 @@ tell application "Mail"
                     set msgSender to sender of msg
                     set msgRead to read status of msg
                     set msgDate to date received of msg
+                    set msgId to ""
+                    try
+                        set msgId to message id of msg
+                    end try
                     {_MAIL_FMT_DATE}
                     if msgRead then
                         set mark to "  "
                     else
                         set mark to "● "
                     end if
-                    set output to output & mark & msgSender & " | " & msgSubject & " | " & dateStr & "\\n"
+                    set output to output & mark & msgSender & " | " & msgSubject & " | " & dateStr & " | id:" & msgId & "\\n"
                     set counter to counter + 1
                 end repeat
                 set output to output & "\\n"
@@ -2187,11 +2253,14 @@ end tell
     return _osascript_clean(script, timeout=60)
 
 
-def tool_mail_read(subject: str, sender: str = "", account: str = "",
-                   mailbox: str = "INBOX") -> str:
-    """Read the full content of an email from macOS Mail.app."""
-    where = _mail_where(subject, sender)
-    s_escaped = subject.replace('"', '\\"')
+def tool_mail_read(subject: str = "", sender: str = "", account: str = "",
+                   mailbox: str = "INBOX", message_id: str = "") -> str:
+    """Read the full content of an email from macOS Mail.app.
+
+    Locate by `message_id` (preferred, from mail_list output) or by subject.
+    """
+    where = _mail_where(subject, sender, message_id)
+    s_escaped = (message_id or subject).replace('"', '\\"')
     mbox_find = _mail_mbox_find_script(mailbox, account)
 
     script = f"""
@@ -2223,11 +2292,14 @@ end tell
     return _osascript_clean(script, timeout=30)
 
 
-def tool_mail_delete(subject: str, sender: str = "", account: str = "",
-                     mailbox: str = "INBOX") -> str:
-    """Move an email to Trash in macOS Mail.app."""
-    where = _mail_where(subject, sender)
-    s_escaped = subject.replace('"', '\\"')
+def tool_mail_delete(subject: str = "", sender: str = "", account: str = "",
+                     mailbox: str = "INBOX", message_id: str = "") -> str:
+    """Move an email to Trash in macOS Mail.app.
+
+    Locate by `message_id` (preferred, from mail_list output) or by subject.
+    """
+    where = _mail_where(subject, sender, message_id)
+    s_escaped = (message_id or subject).replace('"', '\\"')
     mbox_find = _mail_mbox_find_script(mailbox, account)
 
     script = f"""
@@ -2250,16 +2322,92 @@ end tell
 """
     result = _osascript_clean(script, timeout=30)
     if result == "ok":
-        return f"ok: moved '{subject}' to Trash"
+        return f"ok: moved '{message_id or subject}' to Trash"
     return result
 
 
-def tool_mail_move(subject: str, sender: str = "", account: str = "",
-                   source_mailbox: str = "INBOX", target_mailbox: str = "") -> str:
-    """Move an email to another folder in macOS Mail.app."""
-    tgt = target_mailbox.replace('"', '\\"')
-    where = _mail_where(subject, sender)
-    s_escaped = subject.replace('"', '\\"')
+def _mbox_target_resolver(target_mailbox: str) -> tuple[str, str]:
+    """Build the AppleScript that resolves `tgtMbox` within `srcAcc`/all accounts.
+
+    Returns (resolver_script, human_label). Raises ValueError for forbidden
+    targets (Drafts/Outbox/Sent) so we never misfile inbound mail there.
+    """
+    category = _mbox_category(target_mailbox)
+    if category == "junk":
+        candidates = _MBOX_JUNK_NAMES
+        label = "Junk"
+    elif category == "trash":
+        candidates = _MBOX_TRASH_NAMES
+        label = "Trash"
+    else:
+        # Literal name — but block obviously-wrong destinations
+        if target_mailbox.strip().lower() in _MBOX_FORBIDDEN:
+            raise ValueError(
+                f"refusing to move inbound mail into '{target_mailbox}'. "
+                f"Use a target like 'junk'/'trash' or a real folder name."
+            )
+        candidates = [target_mailbox]
+        label = target_mailbox
+
+    # AppleScript list literal of candidate names
+    items = ", ".join('"' + c.replace('"', '\\"') + '"' for c in candidates)
+    resolver = f"""
+                set candidateNames to {{{items}}}
+                set tgtMbox to missing value
+                -- Prefer a folder in the message's own account
+                try
+                    set srcAcc to account of theMbox
+                    repeat with cn in candidateNames
+                        repeat with tmb in (mailboxes of srcAcc)
+                            if (name of tmb) is (cn as string) then
+                                set tgtMbox to tmb
+                                exit repeat
+                            end if
+                        end repeat
+                        if tgtMbox is not missing value then exit repeat
+                    end repeat
+                end try
+                -- Fall back to any account
+                if tgtMbox is missing value then
+                    repeat with searchAcc in (every account)
+                        try
+                            repeat with cn in candidateNames
+                                repeat with tmb in (mailboxes of searchAcc)
+                                    if (name of tmb) is (cn as string) then
+                                        set tgtMbox to tmb
+                                        exit repeat
+                                    end if
+                                end repeat
+                                if tgtMbox is not missing value then exit repeat
+                            end repeat
+                        end try
+                        if tgtMbox is not missing value then exit repeat
+                    end repeat
+                end if
+"""
+    return resolver, label
+
+
+def tool_mail_move(subject: str = "", sender: str = "", account: str = "",
+                   source_mailbox: str = "INBOX", target_mailbox: str = "",
+                   message_id: str = "") -> str:
+    """Move an email to another folder in macOS Mail.app.
+
+    `target_mailbox` accepts semantic aliases (junk/spam/垃圾邮件 → the account's
+    Junk folder; trash/废纸篓/已删除 → Trash) as well as literal folder names.
+    Moving inbound mail into Drafts/Outbox/Sent is refused. Locate the source
+    message by `message_id` (preferred) or subject.
+    """
+    if not target_mailbox:
+        return "error: target_mailbox is required"
+    try:
+        resolver, label = _mbox_target_resolver(target_mailbox)
+    except ValueError as e:
+        return f"error: {e}"
+
+    where = _mail_where(subject, sender, message_id)
+    s_escaped = (message_id or subject).replace('"', '\\"')
+    tgt_escaped = target_mailbox.replace('"', '\\"')
     mbox_find = _mail_mbox_find_script(source_mailbox, account)
 
     script = f"""
@@ -2272,33 +2420,9 @@ tell application "Mail"
         try
             set msgs to (messages of theMbox {where})
             if (count of msgs) > 0 then
-                -- Find target in the same account first, then any account
-                set tgtMbox to missing value
-                try
-                    set srcAcc to account of theMbox
-                    repeat with tmb in (mailboxes of srcAcc)
-                        if (name of tmb) is "{tgt}" then
-                            set tgtMbox to tmb
-                            exit repeat
-                        end if
-                    end repeat
-                end try
+                {resolver}
                 if tgtMbox is missing value then
-                    -- Search all accounts
-                    repeat with searchAcc in (every account)
-                        try
-                            repeat with tmb in (mailboxes of searchAcc)
-                                if (name of tmb) is "{tgt}" then
-                                    set tgtMbox to tmb
-                                    exit repeat
-                                end if
-                            end repeat
-                        end try
-                        if tgtMbox is not missing value then exit repeat
-                    end repeat
-                end if
-                if tgtMbox is missing value then
-                    return "error: target mailbox \\"{tgt}\\" not found"
+                    return "error: target mailbox \\"{tgt_escaped}\\" not found in any account"
                 end if
                 move item 1 of msgs to tgtMbox
                 return "ok"
@@ -2310,8 +2434,21 @@ end tell
 """
     result = _osascript_clean(script, timeout=30)
     if result == "ok":
-        return f"ok: moved '{subject}' to '{target_mailbox}'"
+        return f"ok: moved '{message_id or subject}' to {label}"
     return result
+
+
+def tool_mail_junk(subject: str = "", sender: str = "", account: str = "",
+                   mailbox: str = "INBOX", message_id: str = "") -> str:
+    """Mark an email as junk — move it to the account's Junk/Spam folder.
+
+    Convenience wrapper over mail_move for cleaning ads/spam. Locate by
+    `message_id` (preferred) or subject.
+    """
+    return tool_mail_move(
+        subject=subject, sender=sender, account=account,
+        source_mailbox=mailbox, target_mailbox="junk", message_id=message_id,
+    )
 
 
 # ── Daily briefing ───────────────────────────────────────────────────────────
@@ -2420,7 +2557,8 @@ def dispatch(name: str, args: dict, vision: bool = False) -> Any:
         # Mail
         case "mail_accounts": return tool_mail_accounts()
         case "mail_list":    return tool_mail_list(args.get("account", ""), args.get("mailbox", "INBOX"), args.get("limit", 20), args.get("unread_only", False))
-        case "mail_read":    return tool_mail_read(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"))
-        case "mail_delete":  return tool_mail_delete(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"))
-        case "mail_move":    return tool_mail_move(args["subject"], args.get("sender", ""), args.get("account", ""), args.get("source_mailbox", "INBOX"), args["target_mailbox"])
+        case "mail_read":    return tool_mail_read(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
+        case "mail_delete":  return tool_mail_delete(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
+        case "mail_junk":    return tool_mail_junk(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
+        case "mail_move":    return tool_mail_move(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("source_mailbox", "INBOX"), args["target_mailbox"], args.get("message_id", ""))
         case _:              return f"error: unknown tool '{name}'"

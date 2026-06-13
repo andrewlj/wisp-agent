@@ -33,7 +33,7 @@ def _load_config() -> dict:
 
 _cfg = _load_config()
 
-VERSION    = "1.0"
+VERSION    = "1.1"
 BASE_URL   = _cfg["server"]["base_url"]
 API_KEY    = _cfg["server"]["api_key"]
 MODEL      = _cfg["model"]["name"]

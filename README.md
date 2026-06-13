@@ -100,7 +100,7 @@ python agent.py "Count how many files are on my Desktop"
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (55 total)
+## Tools (58 total)
 
 | Category | Tools |
 |----------|-------|
@@ -115,6 +115,7 @@ python agent.py "Count how many files are on my Desktop"
 | Notes | `notes_list`, `notes_read`, `notes_create`, `notes_append`, `notes_delete` |
 | Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_send`, `mail_delete`, `mail_junk`, `mail_move`, `mail_move_all` |
 | Task | `task_init`, `task_step_done`, `task_step_fail` |
+| Scheduler | `schedule_list`, `schedule_add`, `schedule_remove` |
 | News | `daily_briefing` |
 | Learn | `learn` |
 
@@ -125,9 +126,12 @@ All persistent data lives under `~/wisp/`:
 ```
 ~/wisp/
 ├── workspace/          # agent file outputs (reports, screenshots, downloads)
-│   └── daily-report/   # generated HTML briefings
+│   ├── daily-report/   # generated HTML briefings
+│   └── briefings/      # scheduled-task output (markdown)
 ├── sessions/           # saved conversation histories
 ├── tasks/              # multi-step task checkpoints
+├── logs/               # per-job run logs for scheduled tasks
+├── schedule.yaml       # scheduled job definitions
 └── knowledge.md        # learned tool usage rules (grows over time)
 ```
 
@@ -173,6 +177,33 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 ---
 
 ## Development Log
+
+### v1.1 — Scheduler (proactive tasks)
+
+wisp can now run tasks on a schedule, not just on demand.
+
+**Headless run core (shared with a future Gateway)**
+- `run_once(prompt, sink, name)` runs a single agent task decoupled from the
+  REPL and delivers the result through a pluggable sink (`notify` = macOS
+  notification + saved file, `file`, `stdout`). Decorative output is redirected
+  to `~/wisp/logs/<name>.log`; only the final answer is delivered.
+- `run_agent` now returns its final answer; `agent.py run "<prompt>" --sink …`
+  and `agent.py run --job <name>` invoke it headlessly.
+- This is deliberately the same entrypoint a remote Gateway would call, so the
+  later Telegram/socket work reuses it instead of conflicting.
+
+**Scheduling via launchd**
+- Jobs live in `~/wisp/schedule.yaml` (name, prompt, schedule, sink,
+  `allow_outward: false`). `schedule.py` parses `HH:MM`/cron into a launchd
+  `StartCalendarInterval` and installs a LaunchAgent per enabled job.
+- launchd over cron: native, catches up missed runs after sleep, and runs in
+  the user GUI session so Mail/EventKit/notification access works (verified the
+  launchd-spawned process keeps the TCC grants).
+- `schedule_list` / `schedule_add` / `schedule_remove` tools manage jobs in
+  natural language ("every morning summarize my email"); CLI:
+  `agent.py schedule list|remove|on|off|install`.
+- Scheduled jobs are read-only by default (`allow_outward: false`) — no
+  autonomous send/delete.
 
 ### v1.0 — Small-model reliability & EventKit performance
 
@@ -376,7 +407,8 @@ across multiple accounts (Gmail, Hotmail/Outlook, iCloud) in mixed languages:
 
 ## Roadmap
 
-- [ ] Gateway architecture — Unix socket IPC + Telegram bot adapter for remote Mac control
+- [x] Scheduler — recurring headless tasks via launchd (v1.1)
+- [ ] Gateway architecture — Unix socket IPC + Telegram bot adapter for remote Mac control (reuses the v1.1 headless `run_once` core)
 - [ ] Tool set expansion — more reliable automation coverage
 
 ## License

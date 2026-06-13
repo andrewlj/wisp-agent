@@ -108,13 +108,16 @@ def _install(name: str) -> str:
         return f"error: bad schedule '{job.get('schedule')}'"
     _LAUNCH_DIR.mkdir(parents=True, exist_ok=True)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log = str(_LOG_DIR / f"{name}.log")
+    # run_once owns <name>.log (the run transcript); launchd writes only its own
+    # level (crashes/import errors before run_once) to a separate file so the two
+    # don't fight over the same handle.
+    launchd_log = str(_LOG_DIR / f"{name}.launchd.log")
     plist = {
         "Label": f"{_LABEL_PFX}{name}",
         "ProgramArguments": [_PYTHON, _AGENT_PY, "run", "--job", name],
         "StartCalendarInterval": cal,
-        "StandardOutPath": log,
-        "StandardErrorPath": log,
+        "StandardOutPath": launchd_log,
+        "StandardErrorPath": launchd_log,
         "RunAtLoad": False,
         "EnvironmentVariables": {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",

@@ -546,6 +546,19 @@ SCHEMAS: list[dict] = [
             "cc":      {"type": "string", "description": "Optional CC address(es), comma-separated."},
         }, ["to", "subject", "body"]),
 
+    _fn("mail_draft",
+        "Compose an email and save it to Drafts WITHOUT sending. Use when the "
+        "user wants to review/edit before sending, or to draft a reply for them "
+        "to approve. Safer than mail_send — nothing goes out until they send it "
+        "from Mail. Same arguments as mail_send.",
+        {
+            "to":      {"type": "string", "description": "Recipient address(es), comma-separated."},
+            "subject": {"type": "string", "description": "Email subject."},
+            "body":    {"type": "string", "description": "Email body text."},
+            "account": {"type": "string", "description": "From account email. Omit for Mail's default."},
+            "cc":      {"type": "string", "description": "Optional CC address(es), comma-separated."},
+        }, ["to", "subject", "body"]),
+
     _fn("mail_move_all",
         "Move ALL messages from one folder to another, within each account. "
         "Main use: empty the Trash by moving everything into Junk — macOS Mail "
@@ -3026,16 +3039,10 @@ def _osa_str(s: str) -> str:
     return '"' + s + '"'
 
 
-def tool_mail_send(to: str, subject: str, body: str,
-                   account: str = "", cc: str = "") -> str:
-    """Send an email via macOS Mail.app.
-
-    `account` selects the From account by email (omit for Mail's default). `to`
-    and `cc` accept comma-separated addresses. Sends immediately (silently).
-    """
-    if not (to or "").strip():
-        return "error: 'to' recipient is required"
-
+def _mail_compose_script(to: str, subject: str, body: str,
+                         account: str, cc: str, action: str) -> str:
+    """Build the AppleScript to compose an outgoing message and either `send`
+    or `save` (to Drafts) it. action is 'send' or 'save'."""
     if account:
         a = account.replace('"', '\\"')
         sender_block = f"""
@@ -3073,8 +3080,8 @@ def tool_mail_send(to: str, subject: str, body: str,
         f"        make new cc recipient at end of cc recipients with properties {{address:{_osa_str(addr.strip())}}}"
         for addr in (cc or "").split(",") if addr.strip()
     )
-
-    script = f"""
+    final = "send newMsg" if action == "send" else "save newMsg"
+    return f"""
 tell application "Mail"
     {sender_block}
     set newMsg to make new outgoing message with properties {{subject:{_osa_str(subject)}, content:{_osa_str(body)}, visible:false}}
@@ -3083,14 +3090,41 @@ tell application "Mail"
 {cc_lines}
 {set_sender}
     end tell
-    send newMsg
+    {final}
     return "ok"
 end tell
 """
-    result = _osascript_clean(script, timeout=30)
+
+
+def tool_mail_send(to: str, subject: str, body: str,
+                   account: str = "", cc: str = "") -> str:
+    """Send an email via macOS Mail.app.
+
+    `account` selects the From account by email (omit for Mail's default). `to`
+    and `cc` accept comma-separated addresses. Sends immediately (silently).
+    """
+    if not (to or "").strip():
+        return "error: 'to' recipient is required"
+    result = _osascript_clean(
+        _mail_compose_script(to, subject, body, account, cc, "send"), timeout=30)
     if result == "ok":
         frm = f" from {account}" if account else ""
         return f"ok: sent '{subject}' to {to}{frm}"
+    return result
+
+
+def tool_mail_draft(to: str, subject: str, body: str,
+                    account: str = "", cc: str = "") -> str:
+    """Compose an email and save it to Drafts (does NOT send). Use this when the
+    user wants to review/edit before sending, or to draft a reply. The draft
+    lands in the account's Drafts folder."""
+    if not (to or "").strip():
+        return "error: 'to' recipient is required"
+    result = _osascript_clean(
+        _mail_compose_script(to, subject, body, account, cc, "save"), timeout=30)
+    if result == "ok":
+        frm = f" in {account}" if account else ""
+        return f"ok: saved draft '{subject}' to Drafts{frm} — review and send in Mail"
     return result
 
 

@@ -616,6 +616,26 @@ SCHEMAS: list[dict] = [
                 "enum": ["browser", "bash", "files", "general"],
             },
         }, ["rule", "category"]),
+
+    # ── Scheduler ───────────────────────────────────────────────────────────
+    _fn("schedule_list", "List all recurring scheduled tasks.", {}, []),
+
+    _fn("schedule_add",
+        "Create or update a recurring task that runs automatically in the "
+        "background. Use when the user wants something done on a schedule (e.g. "
+        "'every morning summarize my unread email and today's calendar'). The "
+        "task runs headlessly and delivers its result via the chosen sink. Keep "
+        "the prompt read-only (summarize/list) — scheduled tasks must not send "
+        "or delete.",
+        {
+            "name":     {"type": "string", "description": "Short unique id, e.g. 'morning-briefing'."},
+            "prompt":   {"type": "string", "description": "What the task should do, as a natural-language instruction. Read-only: summarize/list, never send/delete."},
+            "schedule": {"type": "string", "description": "When to run: 'HH:MM' for daily (e.g. '08:00'), or cron 'M H * * *' / 'M H * * D' where the minute is a number and D is a single weekday 0-6 (0=Sun)."},
+            "sink":     {"type": "string", "description": "Output: 'notify' (macOS notification + saved file; default), 'file', or 'stdout'."},
+        }, ["name", "prompt", "schedule"]),
+
+    _fn("schedule_remove", "Delete a scheduled task by name.",
+        {"name": {"type": "string", "description": "The job name to remove."}}, ["name"]),
 ]
 
 
@@ -3067,6 +3087,24 @@ def tool_task_step_fail(task_id: str, step_id: int, reason: str = "") -> str:
 def tool_learn(rule: str, category: str = "general") -> str:
     import knowledge as _knowledge
     return _knowledge.append_rule(rule, category)
+
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+
+def tool_schedule_list() -> str:
+    import schedule as _sched
+    return _sched.format_jobs()
+
+
+def tool_schedule_add(name: str, prompt: str, schedule: str,
+                      sink: str = "notify") -> str:
+    import schedule as _sched
+    return _sched.add_job(name, prompt, schedule, sink)
+
+
+def tool_schedule_remove(name: str) -> str:
+    import schedule as _sched
+    return _sched.remove_job(name)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -118,46 +118,58 @@ def _build_system_prompt(profile: dict) -> str:
     if kb:
         parts.append(kb)
 
-    # 4. Static environment rules
-    parts.append(f"""\
-## 运行环境
-You are running on macOS (Apple Silicon). Shell: zsh. Python: python3.11. Package manager: Homebrew.
-Always use macOS/BSD command syntax — NOT Linux/GNU:
-- Memory : `vm_stat`, `sysctl hw.memsize`
-- Disk   : `df -h`, `diskutil`
-- Process: `ps aux` (BSD flags, no `--` prefix)
-- File   : `stat -f "%z %N"`
-- Date   : `date -r <epoch>`
-- sed    : `sed -i ''`
+    # 4. Static environment rules — concise and ordered for small models.
+    #    Tool-specific lines are pruned when their group is disabled, so the
+    #    model is never told about tools it cannot see.
+    disabled = set(globals().get("DISABLED_TOOL_GROUPS") or ())
 
-## Workspace & security
-- ALL file outputs MUST go inside: {_workspace_abs}
-- NEVER write, move, copy, or delete files outside the workspace.
-- NEVER run destructive commands (rm -rf, sudo rm, dd, mkfs, chmod 777).
-- NEVER send user data to external services autonomously.
-- If a security error is returned, report it — do NOT bypass.
+    # Highest-priority behavioural rules first.
+    act_lines = [
+        "- For any actionable task, call the FIRST tool immediately — output NO text before it.",
+        "- One well-formed call beats several probing attempts.",
+        "- If a tool returns `error: ...`, read it and fix your next call — never repeat the same failing call or bypass it.",
+        "- Use `read_file`/`write_file` for file content; `bash` for everything else.",
+    ]
+    if "system" not in disabled:
+        act_lines.append("- Use `osascript` for notifications, app control, and dialogs.")
+    if "browser" not in disabled:
+        act_lines.append("- Use `browser_*` for interactive web tasks (forms, logins, SPAs), not `http_get`.")
+    if "travel" not in disabled:
+        act_lines.append("- Use `flight_search`/`hotel_search` for flights/hotels, not `browser_*`.")
+    act_lines.append("- Call `done` as soon as the task is fully complete.")
+    act_lines.append(
+        "- Date/time tasks: FIRST run `bash date '+%Y-%m-%d %H:%M %A'`. macOS date "
+        "arithmetic puts flags BEFORE the format: `date -v+1d '+%Y-%m-%d'` is correct, "
+        "`date '+%Y-%m-%d' -v+1d` is wrong."
+    )
 
-## Tool usage
-- For any actionable task, call the first tool immediately — output NO text before the first tool call.
-- Prefer a single well-formed command over multiple probing attempts.
-- If a command fails, read the error and fix it before retrying.
-- Use `read_file` / `write_file` for file content; `bash` for everything else.
-- Use `osascript` for notifications, app control, dialogs.
-- Use `browser_*` for interactive web tasks (forms, logins, dynamic SPAs) — not `http_get`.
-- For flights / hotels use the dedicated `flight_search` / `hotel_search` tools, not `browser_*`.
-- Call `done` as soon as the task is fully complete.
-- When the task involves dates or times (today, tomorrow, next week, etc.), ALWAYS run `bash date '+%Y-%m-%d %H:%M %A'` first to get the current time before calculating any date.
-- On macOS, date arithmetic flags MUST come before the format string. Correct: `date -v+1d '+%Y-%m-%d'` (tomorrow), `date -v+3d '+%Y-%m-%d'` (3 days from now). WRONG: `date '+%Y-%m-%d' -v+1d` — the format must be last.
+    rule_sections = [
+        f"""## 运行环境 (macOS, Apple Silicon · zsh · python3.11 · Homebrew)
+Use macOS/BSD syntax, not Linux/GNU: `vm_stat`/`sysctl hw.memsize` (memory), \
+`df -h`/`diskutil` (disk), `ps aux` (BSD flags), `stat -f "%z %N"`, `date -r <epoch>`, `sed -i ''`.
 
-## Task tracking
-- For any task with 3 or more steps, ALWAYS call `task_init` first.
-- Call `task_step_done` after each step; `task_step_fail` if a step cannot complete.
+## 安全红线 (hard limits)
+- Write/move/copy/delete files ONLY inside: {_workspace_abs}
+- NEVER run destructive commands (rm -rf, sudo rm, dd, mkfs, chmod 777) or send user data to external services on your own.
 
-## Learning
-- When the user corrects your approach or points out a mistake, IMMEDIATELY call `learn()`
-  before continuing. Do not just apologise — record the correct rule.
-- Rule format: one sentence — "完成[任务类型]应该用[工具]，不用[错误工具]"
-""")
+## 行动规则
+""" + "\n".join(act_lines)
+    ]
+
+    if "task" not in disabled:
+        rule_sections.append(
+            "## 任务跟踪\n"
+            "- For a task with 3+ steps, call `task_init` first, then `task_step_done` "
+            "after each step (`task_step_fail` if one cannot complete)."
+        )
+    if "learn" not in disabled:
+        rule_sections.append(
+            "## 学习\n"
+            "- When the user corrects you, IMMEDIATELY call `learn()` before continuing — "
+            'record the rule as one sentence: "完成[任务类型]应该用[工具]，不用[错误工具]". Do not just apologise.'
+        )
+
+    parts.append("\n\n".join(rule_sections))
 
     return "\n\n".join(parts)
 

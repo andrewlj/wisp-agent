@@ -5,6 +5,8 @@ server:
 model:
   name: "your-model-name"   # e.g. Qwen3.5-9B-MLX-8bit
   max_tokens: 4096
+  context_window: 0         # model's context window in tokens (e.g. 65535); 0 = unknown.
+                            # When set, the REPL shows live ctx usage % per turn.
   vision: false             # set true if your model supports image input (e.g. Qwen2.5-VL)
 
 agent:

@@ -37,6 +37,7 @@ BASE_URL   = _cfg["server"]["base_url"]
 API_KEY    = _cfg["server"]["api_key"]
 MODEL      = _cfg["model"]["name"]
 MAX_TOKENS = _cfg["model"]["max_tokens"]
+CONTEXT_WINDOW = _cfg["model"].get("context_window", 0)  # 0 = unknown; set to show % usage
 MAX_TURNS  = _cfg["agent"]["max_turns"]
 BASH_TO    = _cfg["agent"]["bash_timeout"]
 VISION          = _cfg.get("model", {}).get("vision", False)
@@ -507,16 +508,36 @@ _TURN_WIDTH = _LOGO_LINE_W  # align turn separators with the banner
 _DEBUG      = False          # toggled by /debug command
 
 
+def _fmt_tok(n: int) -> str:
+    """Compact token count: 950 → '950', 6395 → '6.4k'."""
+    return f"{n/1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _context_hint(messages: list) -> tuple[str, str]:
+    """Build the always-on context-usage indicator. Returns (plain, colored).
+
+    Shows estimated total request tokens (conversation + tool schemas). When
+    model.context_window is configured, also shows % used with green/amber/red
+    coding so you can see how close you are to the limit without debug mode.
+    """
+    est = _estimate_tokens(messages) + _schema_tokens()
+    if CONTEXT_WINDOW > 0:
+        pct = est * 100 // CONTEXT_WINDOW
+        plain = f"  ctx ~{_fmt_tok(est)}/{_fmt_tok(CONTEXT_WINDOW)} {pct}%"
+        color = _rgb(90, 170, 90) if pct < 60 else (
+                _rgb(210, 160, 40) if pct < 85 else _rgb(210, 70, 70))
+    else:
+        plain = f"  ctx ~{_fmt_tok(est)}"
+        color = _rgb(120, 90, 200)
+    return plain, f"{C.DIM}{color}{plain}{C.RESET}"
+
+
 def _print_turn_header(turn: int, max_turns: int, messages: list | None = None) -> None:
-    token_hint = ""
-    if _DEBUG and messages is not None:
-        est = _estimate_tokens(messages) + _schema_tokens()
-        token_hint = f"  {C.DIM}{_rgb(120,90,200)}~{est} tok{C.RESET}"
+    plain_hint, token_hint = ("", "")
+    if messages is not None:
+        plain_hint, token_hint = _context_hint(messages)
     label     = f" turn {turn}/{max_turns} "
-    # account for token_hint's visible length (no ANSI) when computing bars
-    hint_vis  = (f"  ~{_estimate_tokens(messages) + _schema_tokens()} tok"
-                 if (_DEBUG and messages) else "")
-    bar_total = _TURN_WIDTH - len(label) - len(hint_vis) - 2
+    bar_total = _TURN_WIDTH - len(label) - len(plain_hint) - 2
     left_bar  = 4
     right_bar = max(0, bar_total - left_bar)
     line = (f"{_rgb(0,80,95)}{'─'*left_bar}{C.RESET}"

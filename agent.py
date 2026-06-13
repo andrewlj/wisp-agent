@@ -510,11 +510,12 @@ _DEBUG      = False          # toggled by /debug command
 def _print_turn_header(turn: int, max_turns: int, messages: list | None = None) -> None:
     token_hint = ""
     if _DEBUG and messages is not None:
-        est = _estimate_tokens(messages)
+        est = _estimate_tokens(messages) + _schema_tokens()
         token_hint = f"  {C.DIM}{_rgb(120,90,200)}~{est} tok{C.RESET}"
     label     = f" turn {turn}/{max_turns} "
     # account for token_hint's visible length (no ANSI) when computing bars
-    hint_vis  = f"  ~{_estimate_tokens(messages or [])} tok" if (_DEBUG and messages) else ""
+    hint_vis  = (f"  ~{_estimate_tokens(messages) + _schema_tokens()} tok"
+                 if (_DEBUG and messages) else "")
     bar_total = _TURN_WIDTH - len(label) - len(hint_vis) - 2
     left_bar  = 4
     right_bar = max(0, bar_total - left_bar)
@@ -741,6 +742,21 @@ def _estimate_tokens(messages: list) -> int:
         for tc in m.get("tool_calls", []):
             total += _count_tokens_est(tc.get("function", {}).get("arguments", ""))
     return int(total)
+
+
+_SCHEMA_TOKENS_CACHE: int | None = None
+
+
+def _schema_tokens() -> int:
+    """Estimated tokens for the tool schemas sent on every request. This is a
+    fixed per-config overhead (~6k for all tools) that the messages estimate
+    omits — including it makes the displayed `~N tok` reflect the real request
+    size, not just the conversation."""
+    global _SCHEMA_TOKENS_CACHE
+    if _SCHEMA_TOKENS_CACHE is None:
+        _SCHEMA_TOKENS_CACHE = int(
+            _count_tokens_est(json.dumps(SCHEMAS_ACTIVE, ensure_ascii=False)))
+    return _SCHEMA_TOKENS_CACHE
 
 
 def _call_api_simple(messages: list, max_tokens: int = 1024) -> str:

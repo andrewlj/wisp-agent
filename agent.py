@@ -43,7 +43,8 @@ BASH_TO    = _cfg["agent"]["bash_timeout"]
 VISION          = _cfg.get("model", {}).get("vision", False)
 WORKSPACE       = _cfg["agent"].get("workspace", "~/wisp-workspace")
 STRICT          = _cfg["agent"].get("strict_workspace", True)
-CTX_LIMIT       = _cfg["agent"].get("context_limit", 6000)
+COMPRESS_AT_PCT = _cfg["agent"].get("compress_at_percent", 75)
+COMPRESS_AT_PCT = min(95, max(10, COMPRESS_AT_PCT))  # clamp to a sane range
 CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
 MAX_TOOL_RESULT = _cfg["agent"].get("max_tool_result_chars", 4000)
 BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
@@ -837,16 +838,20 @@ def _build_compress_transcript(middle: list[dict]) -> str:
 
 
 def _maybe_compress(messages: list) -> None:
-    """Compress context in-place if token estimate exceeds CTX_LIMIT.
+    """Compress context in-place when the request reaches COMPRESS_AT_PCT% of
+    the model's context window.
 
-    Keeps messages[0] (system prompt) + the last CTX_KEEP_RECENT messages
-    verbatim. Summarises everything in between with a single LLM call and
-    replaces those messages with one system-role summary message.
+    The threshold is derived from model.context_window so there's a single knob
+    to reason about: the displayed `ctx …%` and the compression trigger use the
+    same number (conversation + tool schemas). Disabled when context_window is
+    unknown (0). Keeps messages[0] (system prompt) + the last CTX_KEEP_RECENT
+    messages verbatim and summarises the middle.
     """
-    if CTX_LIMIT <= 0:
-        return
-    est = _estimate_tokens(messages)
-    if est <= CTX_LIMIT:
+    if CONTEXT_WINDOW <= 0:
+        return  # no window configured → can't compute a %, compression off
+    threshold = CONTEXT_WINDOW * COMPRESS_AT_PCT // 100
+    est = _estimate_tokens(messages) + _schema_tokens()
+    if est <= threshold:
         return
 
     # Need at least system + 2 middle + recent to bother compressing
@@ -1056,7 +1061,7 @@ def run_agent(user_input: str, messages: list, session_id: str = "") -> None:
             code = getattr(getattr(e, "response", None), "status_code", "?")
             print(f"\n  {_rgb(200,80,80)}✗  API error {code}: request rejected.{C.RESET}")
             print(f"  {C.DIM}{_rgb(150,150,150)}Likely the context grew past the model's "
-                  f"window. Try /new to reset, lower context_limit, or set "
+                  f"window. Try /new to reset, lower compress_at_percent, or set "
                   f"disabled_tool_groups in config.yaml.{C.RESET}")
             break
         except Exception as e:

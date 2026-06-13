@@ -38,3 +38,11 @@ agent:
 # Leave empty to disable these tools.
 serpapi:
   api_key: ""
+
+# Optional: Telegram gateway — chat with wisp from your phone, and let scheduled
+# jobs deliver to Telegram (sink: telegram). Create a bot via @BotFather for the
+# token; get your numeric id from @userinfobot. Only this user_id is served.
+# Run the gateway: `python agent.py gateway install` (persistent via launchd).
+telegram:
+  bot_token: ""
+  user_id: 0

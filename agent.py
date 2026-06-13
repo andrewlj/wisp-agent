@@ -52,6 +52,8 @@ HEADLESS_TIMEOUT   = _cfg["agent"].get("headless_timeout", 240)     # wall-clock
 HEADLESS_MAX_TURNS = _cfg["agent"].get("headless_max_turns", 10)    # turn cap for scheduled runs
 BROWSER_TO      = _cfg["agent"].get("browser_timeout", 30)
 DISABLED_TOOL_GROUPS = _cfg["agent"].get("disabled_tool_groups", []) or []
+TELEGRAM_BOT_TOKEN = _cfg.get("telegram", {}).get("bot_token", "") or ""
+TELEGRAM_USER_ID   = str(_cfg.get("telegram", {}).get("user_id", "") or "").strip()
 
 # Tool menu actually sent to the model — trimmed by config for small models.
 SCHEMAS_ACTIVE  = active_schemas(DISABLED_TOOL_GROUPS)
@@ -1150,6 +1152,38 @@ def _sink_notify(title: str, body: str) -> None:
         pass
 
 
+def _telegram_send(text: str, chat_id: str | None = None) -> bool:
+    """Send a message to Telegram (defaults to the configured user). Splits
+    long text to fit Telegram's 4096-char limit. Returns True on success."""
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+    chat = str(chat_id or TELEGRAM_USER_ID).strip()
+    if not chat:
+        return False
+    text = text or "(empty)"
+    # split on line boundaries under ~3900 chars
+    chunks, buf = [], ""
+    for line in text.split("\n"):
+        if len(buf) + len(line) + 1 > 3900:
+            if buf:
+                chunks.append(buf)
+            buf = line[:3900]
+        else:
+            buf = f"{buf}\n{line}" if buf else line
+    if buf:
+        chunks.append(buf)
+    ok = True
+    for chunk in chunks or [text[:3900]]:
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={"chat_id": chat, "text": chunk}, timeout=20)
+            ok = ok and r.status_code == 200
+        except Exception:
+            ok = False
+    return ok
+
+
 def _sink_file(name: str, body: str) -> str:
     """Write the full output to ~/wisp/workspace/briefings/<name>-<date>.md."""
     from datetime import datetime
@@ -1227,6 +1261,9 @@ def run_once(prompt: str, sink: str = "stdout", name: str = "wisp") -> str:
     elif sink == "file":
         path = _sink_file(name, answer)
         print(f"saved: {path}")
+    elif sink == "telegram":
+        _telegram_send(answer)
+        _sink_file(name, answer)   # keep a copy on disk too
     return answer
 
 
@@ -1490,6 +1527,9 @@ if __name__ == "__main__":
     elif _argv and _argv[0] == "schedule":
         import schedule as _sched
         _sched.cli(_argv[1:])
+    elif _argv and _argv[0] == "gateway":
+        import gateway as _gw
+        _gw.cli(_argv[1:])
     elif _argv:
         # legacy one-shot: agent.py "<task>"
         _profile  = _load_profile()

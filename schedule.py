@@ -26,7 +26,7 @@ _LABEL_PFX  = "com.wisp."
 _AGENT_PY   = str(Path(__file__).resolve().parent / "agent.py")
 _PYTHON     = sys.executable
 
-_VALID_SINKS = {"notify", "file", "stdout"}
+_VALID_SINKS = {"notify", "file", "stdout", "telegram"}
 
 
 # ── Storage ────────────────────────────────────────────────────────────────

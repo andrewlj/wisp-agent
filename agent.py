@@ -594,12 +594,25 @@ def run_turn(messages: list, turn: int = 0, max_turns: int = 0,
 
     for tc in tool_calls:
         name = tc["name"]
-        args = json.loads(tc["arguments"])
+
+        # Parse args defensively — small models emit malformed/truncated JSON.
+        # On failure, feed the error back as the tool result so the model can
+        # retry, instead of crashing the whole REPL.
+        raw_args = tc.get("arguments") or "{}"
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except (json.JSONDecodeError, AttributeError) as e:
+            _print_tool_call(name, {})
+            err = (f"error: could not parse arguments for tool '{name}' as JSON "
+                   f"({e}). Re-issue the call with valid JSON arguments.")
+            _print_tool_result(err, 0.0)
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+            continue
 
         _print_tool_call(name, args)
 
         if name == "done":
-            _print_done(args.get("result", ""))
+            _print_done(args.get("result", "") if isinstance(args, dict) else "")
             return True
 
         # A — time each tool dispatch

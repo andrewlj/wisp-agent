@@ -396,8 +396,8 @@ SCHEMAS: list[dict] = [
     _fn("calendar_list",
         "List upcoming events from macOS Calendar app.",
         {
-            "days":     {"type": "integer", "description": "How many days ahead to look. Default 7."},
-            "calendar": {"type": "string",  "description": "Optional: name of a specific calendar."},
+            "days":          {"type": "integer", "description": "How many days ahead to look. Default 7."},
+            "calendar_name": {"type": "string",  "description": "Optional: name of a specific calendar."},
         }, []),
 
     _fn("calendar_add",
@@ -406,7 +406,7 @@ SCHEMAS: list[dict] = [
             "title":    {"type": "string", "description": "Event title"},
             "start":    {"type": "string", "description": "Start date/time: 'YYYY-MM-DD HH:MM'"},
             "end":      {"type": "string", "description": "Optional end date/time. Default: start + 1 hour."},
-            "calendar": {"type": "string", "description": "Optional: target calendar name. Default: first writable calendar."},
+            "calendar_name": {"type": "string", "description": "Optional: target calendar name. Default: first writable calendar."},
             "notes":    {"type": "string", "description": "Optional event notes."},
         }, ["title", "start"]),
 
@@ -415,7 +415,7 @@ SCHEMAS: list[dict] = [
         {
             "title":    {"type": "string", "description": "Event title (exact or partial match)."},
             "start":    {"type": "string", "description": "Optional: event start date 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' to disambiguate when multiple events share the same title."},
-            "calendar": {"type": "string", "description": "Optional: calendar name to narrow the search."},
+            "calendar_name": {"type": "string", "description": "Optional: calendar name to narrow the search."},
         }, ["title"]),
 
     # ── Notes ─────────────────────────────────────────────────────────────────
@@ -2612,73 +2612,54 @@ def tool_learn(rule: str, category: str = "general") -> str:
 # DISPATCH
 # ═════════════════════════════════════════════════════════════════════════════
 
+import inspect as _inspect
+
+# Registries built once from SCHEMAS + the tool_<name> functions. `done` is
+# handled in the agent loop, not here, so it has no implementation.
+_TOOL_FUNCS: dict[str, Any] = {}
+_TOOL_REQUIRED: dict[str, list[str]] = {}
+_TOOL_PARAMS: dict[str, set[str]] = {}
+for _sc in SCHEMAS:
+    _n = _sc["function"]["name"]
+    _fn_impl = globals().get(f"tool_{_n}")
+    if _fn_impl is None:
+        continue
+    _TOOL_FUNCS[_n] = _fn_impl
+    _TOOL_REQUIRED[_n] = _sc["function"]["parameters"].get("required", [])
+    _TOOL_PARAMS[_n] = set(_inspect.signature(_fn_impl).parameters)
+
+
 def dispatch(name: str, args: dict, vision: bool = False) -> Any:
-    match name:
-        # Core
-        case "bash":             return tool_bash(args["command"])
-        case "read_file":        return tool_read_file(args["path"])
-        case "write_file":       return tool_write_file(args["path"], args["content"])
-        # Mac system
-        case "screenshot":       return tool_screenshot(args.get("app", ""), args.get("save_path", ""), vision)
-        case "osascript":        return tool_osascript(args["script"])
-        case "clipboard_read":   return tool_clipboard_read()
-        case "clipboard_write":  return tool_clipboard_write(args["text"])
-        case "open":             return tool_open(args["target"], args.get("app", ""))
-        case "list_apps":        return tool_list_apps()
-        case "focus_app":        return tool_focus_app(args["app"])
-        case "quit_app":         return tool_quit_app(args["app"], args.get("force", False))
-        # File operations
-        case "find_files":       return tool_find_files(args["query"], args.get("dir", ""), args.get("limit", 20))
-        case "move_file":        return tool_move_file(args["src"], args["dst"])
-        case "copy_file":        return tool_copy_file(args["src"], args["dst"])
-        case "delete_file":      return tool_delete_file(args["path"])
-        # Network
-        case "http_get":         return tool_http_get(args["url"], args.get("headers"))
-        case "http_post":        return tool_http_post(args["url"], args["body"], args.get("headers"))
-        # Daily briefing
-        case "daily_briefing":     return tool_daily_briefing(
-                                       args.get("open_browser", True),
-                                       args.get("sections"))
-        # Browser
-        case "browser_open":       return tool_browser_open(args["url"])
-        case "browser_click":      return tool_browser_click(args["selector"])
-        case "browser_type":       return tool_browser_type(args["selector"], args["text"])
-        case "browser_get_text":   return tool_browser_get_text(args.get("selector", ""))
-        case "browser_screenshot": return tool_browser_screenshot(args.get("save_path", ""))
-        case "browser_close":      return tool_browser_close()
-        case "browser_wait":       return tool_browser_wait(args["selector"], args.get("timeout", 10))
-        case "browser_select":     return tool_browser_select(args["selector"], args["value"])
-        case "browser_scroll":     return tool_browser_scroll(args.get("direction", "down"), args.get("amount", 500))
-        case "browser_snapshot":   return tool_browser_snapshot()
-        # Travel
-        case "flight_search":      return tool_flight_search(args["origin"], args["destination"], args["date"], args.get("return_date", ""), args.get("passengers", 1), args.get("cabin", "economy"))
-        case "hotel_search":       return tool_hotel_search(args["city"], args["checkin"], args["checkout"], args.get("guests", 1), args.get("rooms", 1))
-        # Task checkpoint
-        case "task_init":        return tool_task_init(args["title"], args["steps"])
-        case "task_step_done":   return tool_task_step_done(args["task_id"], args["step_id"], args.get("note", ""))
-        case "task_step_fail":   return tool_task_step_fail(args["task_id"], args["step_id"], args.get("reason", ""))
-        case "learn":            return tool_learn(args["rule"], args.get("category", "general"))
-        # Reminders
-        case "reminders_list":     return tool_reminders_list(args.get("list_name", ""), args.get("limit", 20), args.get("due_before", ""), args.get("due_after", ""))
-        case "reminders_add":      return tool_reminders_add(args["title"], args.get("due", ""), args.get("notes", ""), args.get("list_name", "Reminders"))
-        case "reminders_complete": return tool_reminders_complete(args["title"], args["list_name"])
-        case "reminders_delete":   return tool_reminders_delete(args["title"], args["list_name"])
-        # Calendar
-        case "calendar_list":    return tool_calendar_list(args.get("days", 7), args.get("calendar", ""))
-        case "calendar_add":     return tool_calendar_add(args["title"], args["start"], args.get("end", ""), args.get("calendar", ""), args.get("notes", ""))
-        case "calendar_delete":  return tool_calendar_delete(args["title"], args.get("start", ""), args.get("calendar", ""))
-        # Notes
-        case "notes_list":       return tool_notes_list(args.get("folder", ""), args.get("limit", 20))
-        case "notes_read":       return tool_notes_read(args["title"], args.get("folder", ""))
-        case "notes_create":     return tool_notes_create(args["title"], args["content"], args.get("folder", ""))
-        case "notes_append":     return tool_notes_append(args["title"], args["content"], args.get("folder", ""))
-        case "notes_delete":     return tool_notes_delete(args["title"], args.get("folder", ""))
-        # Mail
-        case "mail_accounts": return tool_mail_accounts()
-        case "mail_list":    return tool_mail_list(args.get("account", ""), args.get("mailbox", "INBOX"), args.get("limit", 20), args.get("unread_only", False))
-        case "mail_read":    return tool_mail_read(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
-        case "mail_delete":  return tool_mail_delete(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
-        case "mail_junk":    return tool_mail_junk(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("mailbox", "INBOX"), args.get("message_id", ""))
-        case "mail_move":    return tool_mail_move(args.get("subject", ""), args.get("sender", ""), args.get("account", ""), args.get("source_mailbox", "INBOX"), args["target_mailbox"], args.get("message_id", ""))
-        case "mail_move_all": return tool_mail_move_all(args["source_mailbox"], args["target_mailbox"], args.get("account", ""))
-        case _:              return f"error: unknown tool '{name}'"
+    """Route a tool call to its implementation.
+
+    Data-driven: resolves `tool_<name>`, validates required args from SCHEMAS,
+    and passes the args dict by keyword (filtered to the function signature).
+    Returns an `error: ...` string for any problem — unknown tool, missing
+    required arg, or an exception inside the tool — so the agent loop can feed
+    it back to the model instead of crashing. This is what lets a small model
+    recover from malformed/incomplete tool calls.
+    """
+    if not isinstance(args, dict):
+        return f"error: tool '{name}' arguments must be a JSON object, got {type(args).__name__}"
+
+    func = _TOOL_FUNCS.get(name)
+    if func is None:
+        return f"error: unknown tool '{name}'"
+
+    # Validate required args (treat empty string / None as missing)
+    missing = [r for r in _TOOL_REQUIRED.get(name, [])
+               if r not in args or args[r] in (None, "")]
+    if missing:
+        return (f"error: tool '{name}' missing required argument(s): "
+                f"{', '.join(missing)}")
+
+    # Pass args by keyword, filtered to what the function accepts; inject vision
+    params = _TOOL_PARAMS[name]
+    kwargs = {k: v for k, v in args.items() if k in params}
+    if "vision" in params:
+        kwargs["vision"] = vision
+
+    try:
+        return func(**kwargs)
+    except Exception as e:
+        return f"error: tool '{name}' failed: {e}"

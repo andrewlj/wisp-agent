@@ -174,6 +174,38 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 
 ## Development Log
 
+### v1.0 — Small-model reliability & EventKit performance
+
+Focused on running stably on a small (~9B) local model and removing the
+multi-second / timeout-prone macOS queries.
+
+**Crash-safe tool loop & data-driven dispatch**
+- The turn loop no longer dies on bad model output. Malformed/truncated JSON
+  arguments and unknown tools are caught and fed back to the model as a tool
+  result so it can self-correct, instead of raising and killing the REPL.
+- `dispatch` is data-driven: it resolves `tool_<name>`, validates required
+  args from the schema (missing arg → friendly error, not `KeyError`), and
+  passes args by keyword filtered to the function signature. One registry
+  instead of a 60-branch manual match.
+
+**Trim the tool menu for small models**
+- Config-driven tool groups: `disabled_tool_groups` in `config.yaml` drops
+  whole categories (e.g. `browser`, `travel`) from the schema sent to the
+  model — fewer tools = better selection accuracy and far less prompt token
+  overhead, with no extra routing call.
+- Leaner, group-aware system prompt; over-long tool descriptions trimmed.
+
+**EventKit fast paths for Calendar & Reminders**
+- Calendar.app / Reminders.app AppleScript queries are iCloud-bound and
+  catastrophically slow (calendar_list took 92s; reminders_add ~12s). Rewrote
+  the hot paths on EventKit's indexed predicates via JXA, each with an
+  automatic AppleScript fallback when EventKit can't see the account stores.
+- `calendar_list` 92s → ~0.1s, `reminders_list` → ~0.2s,
+  `reminders_add/complete/delete` ~12s → ~0.2s, `calendar_delete` → ~0.08s.
+- Same semantics preserved (locale list/calendar names, date-range filters,
+  not-found / no-match errors); AppleScript fallback keeps the slow-calendar
+  skip list for the rare un-indexed case.
+
 ### v0.9 — Mail Management & Context Auto-Compression
 
 **Mail tools (new)** — full macOS Mail.app integration over AppleScript, working

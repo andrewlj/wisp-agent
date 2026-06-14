@@ -533,6 +533,23 @@ def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
 _TURN_WIDTH = _LOGO_LINE_W  # align turn separators with the banner
 _DEBUG      = False          # toggled by /debug command
 
+import re as _re
+_DEBUG_LOG = Path(WORKSPACE).expanduser().parent / "logs" / "debug.log"
+
+
+def _dbg(text: str) -> None:
+    """When debug is on, append a line to the debug log file (ANSI stripped)
+    instead of cluttering the console. The console stays concise."""
+    if not _DEBUG:
+        return
+    try:
+        _DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        clean = _re.sub(r"\x1b\[[0-9;]*m", "", text).rstrip()
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(clean + "\n")
+    except Exception:
+        pass
+
 
 def _fmt_tok(n: int) -> str:
     """Compact token count: 950 → '950', 6395 → '6.4k'."""
@@ -562,6 +579,7 @@ def _print_turn_header(turn: int, max_turns: int, messages: list | None = None) 
     plain_hint, token_hint = ("", "")
     if messages is not None:
         plain_hint, token_hint = _context_hint(messages)
+    _dbg(f"\n──── turn {turn}/{max_turns} ──── {plain_hint.strip()}")
     label     = f" turn {turn}/{max_turns} "
     bar_total = _TURN_WIDTH - len(label) - len(plain_hint) - 2
     left_bar  = 4
@@ -575,17 +593,13 @@ def _print_turn_header(turn: int, max_turns: int, messages: list | None = None) 
 
 def _print_tool_call(name: str, args: dict) -> None:
     name_col = f"{C.BOLD}{_rgb(0,210,210)}{name}{C.RESET}"
-    if _DEBUG:
-        pretty = json.dumps(args, ensure_ascii=False, indent=2)
-        print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}")
-        for ln in pretty.splitlines():
-            print(f"    {C.DIM}{_rgb(140,140,140)}{ln}{C.RESET}")
-    else:
-        args_str = json.dumps(args, ensure_ascii=False)
-        max_args = _TURN_WIDTH - len(name) - 10
-        if len(args_str) > max_args:
-            args_str = args_str[:max_args - 3] + "..."
-        print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}  {C.DIM}{_rgb(140,140,140)}{args_str}{C.RESET}")
+    # Console: always the concise one-liner. Full args go to the debug file.
+    args_str = json.dumps(args, ensure_ascii=False)
+    _dbg(f"→ {name}({json.dumps(args, ensure_ascii=False, indent=2)})")
+    max_args = _TURN_WIDTH - len(name) - 10
+    if len(args_str) > max_args:
+        args_str = args_str[:max_args - 3] + "..."
+    print(f"  {_rgb(0,80,95)}→{C.RESET} {name_col}  {C.DIM}{_rgb(140,140,140)}{args_str}{C.RESET}")
 
 
 def _print_tool_result(result: str, elapsed: float | None = None) -> None:
@@ -601,25 +615,22 @@ def _print_tool_result(result: str, elapsed: float | None = None) -> None:
         color = _rgb(210, 170, 50)
     else:
         color = _rgb(130, 130, 130)
-    # A — timing suffix (debug only)
-    timing = (f"  {C.DIM}{_rgb(100,100,100)}[{elapsed:.2f}s]{C.RESET}"
-              if _DEBUG and elapsed is not None else "")
-    if _DEBUG:
-        print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{r}{C.RESET}{timing}")
+    # Full result + timing go to the debug file; console shows a preview.
+    if elapsed is not None:
+        _dbg(f"← {r}  [{elapsed:.2f}s]")
     else:
-        preview = r[:300] + ("..." if len(r) > 300 else "")
-        print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{preview}{C.RESET}")
+        _dbg(f"← {r}")
+    preview = r[:300] + ("..." if len(r) > 300 else "")
+    print(f"  {_rgb(0,80,95)}←{C.RESET} {color}{preview}{C.RESET}")
 
 
 def _print_debug_usage(usage: dict, llm_s: float) -> None:
-    """C — print real token counts + LLM latency after streaming completes."""
+    """C — real token counts + LLM latency → debug file (not console)."""
     if not _DEBUG:
         return
     pt = usage.get("prompt_tokens",     usage.get("input_tokens",  "?"))
     ct = usage.get("completion_tokens", usage.get("output_tokens", "?"))
-    print(f"  {C.DIM}{_rgb(120,90,200)}"
-          f"prompt {pt} · completion {ct} · llm {llm_s:.1f}s"
-          f"{C.RESET}")
+    _dbg(f"  prompt {pt} · completion {ct} · llm {llm_s:.1f}s")
 
 def _print_done(result_text: str) -> None:
     bar   = f"{_rgb(0,170,100)}{'─' * _TURN_WIDTH}{C.RESET}"
@@ -1051,15 +1062,7 @@ def _print_task_summary(tool_log: list[tuple[str, float]], total_s: float, turns
     for name, _ in tool_log:
         counts[name] = counts.get(name, 0) + 1
     tool_str = " · ".join(f"{n}×{c}" for n, c in counts.items())
-    label = (f" {turns} turn{'s' if turns > 1 else ''}"
-             f" · {total_s:.1f}s · {tool_str} ")
-    bar_total = _TURN_WIDTH - len(label) - 2
-    left_b    = 4
-    right_b   = max(0, bar_total - left_b)
-    line = (f"{_rgb(0,80,95)}{'─'*left_b}{C.RESET}"
-            f"{C.DIM}{_rgb(120,90,200)}{label}{C.RESET}"
-            f"{_rgb(0,80,95)}{'─'*right_b}{C.RESET}")
-    print(f"  {line}")
+    _dbg(f"── {turns} turn{'s' if turns > 1 else ''} · {total_s:.1f}s · {tool_str} ──")
 
 
 def _extract_final_answer(messages: list) -> str:
@@ -1503,7 +1506,7 @@ def interactive() -> None:
                     state = f"{_rgb(0,210,210)}on{C.RESET}" if _DEBUG else f"{_rgb(130,130,130)}off{C.RESET}"
                     print(f"  debug mode {state}"
                           + (f"  {C.DIM}{_rgb(120,90,200)}"
-                             f"(full args · full results · real tokens · tool timing · task summary)"
+                             f"→ full detail written to {_DEBUG_LOG}"
                              f"{C.RESET}"
                              if _DEBUG else ""))
     

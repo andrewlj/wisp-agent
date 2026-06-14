@@ -16,7 +16,7 @@ import yaml
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 
-from tools import SCHEMAS, dispatch, active_schemas
+from tools import SCHEMAS, dispatch, active_schemas, schemas_for_groups
 import session as _session
 import task as _task
 
@@ -57,6 +57,9 @@ TELEGRAM_USER_ID   = str(_cfg.get("telegram", {}).get("user_id", "") or "").stri
 
 # Tool menu actually sent to the model — trimmed by config for small models.
 SCHEMAS_ACTIVE  = active_schemas(DISABLED_TOOL_GROUPS)
+# Per-run override (set by run_once for a scheduled job locked to specific tool
+# groups); None means use SCHEMAS_ACTIVE.
+_SCHEMAS_OVERRIDE = None
 
 # Initialise workspace sandbox, browser timeout, and briefing LLM config
 from tools import init_workspace, init_browser_timeout, init_serpapi
@@ -478,7 +481,7 @@ def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
     resp = _llm_post({
         "model":       MODEL,
         "messages":    messages,
-        "tools":       SCHEMAS_ACTIVE,
+        "tools":       _SCHEMAS_OVERRIDE if _SCHEMAS_OVERRIDE is not None else SCHEMAS_ACTIVE,
         "tool_choice": "auto",
         "max_tokens":  MAX_TOKENS,
         "stream":      True,
@@ -1195,17 +1198,53 @@ def _sink_file(name: str, body: str) -> str:
     return str(path)
 
 
-def run_once(prompt: str, sink: str = "stdout", name: str = "wisp") -> str:
+def _builtin_personal_briefing() -> str:
+    """Deterministic morning briefing — Python calls the real tools and formats
+    the result. No LLM in the loop, so it can't hallucinate (a small model left
+    to orchestrate this will happily fabricate unread counts). Fast and exact."""
+    import tools
+    from datetime import datetime
+    now = datetime.now()
+    wd = ["周一","周二","周三","周四","周五","周六","周日"][now.weekday()]
+    out = [f"☀️ 早安！今天是 {now.strftime('%Y-%m-%d')} {wd}。"]
+
+    unread = tools.tool_mail_list(unread_only=True, limit=15)
+    if "no messages" in unread.lower() or not unread.strip():
+        out.append("📬 未读邮件：全部已读 🎉")
+    else:
+        out.append("📬 未读邮件：\n" + unread.strip())
+
+    cal = tools.tool_calendar_list(days=2)
+    out.append("📅 今明日程：\n" + (cal.strip() or "无"))
+
+    rem = tools.tool_reminders_list(limit=15)
+    if "no pending" in rem.lower() or not rem.strip():
+        out.append("✅ 待办：暂无未完成项")
+    else:
+        out.append("✅ 待办：\n" + rem.strip())
+
+    out.append("——\n想清理广告邮件或回复某封,直接告诉我。")
+    return "\n\n".join(out)
+
+
+_BUILTINS = {"personal_briefing": _builtin_personal_briefing}
+
+
+def run_once(prompt: str, sink: str = "stdout", name: str = "wisp",
+             tool_groups: list | None = None, builtin: str | None = None) -> str:
     """Run a single agent task headlessly and deliver the result via `sink`.
 
     The shared entrypoint for scheduled jobs (and, later, a remote Gateway):
     decoupled from the REPL, with pluggable output. All the decorative agent
     output is redirected to a per-run log; only the final answer is delivered.
+    `tool_groups` locks the run to those tool groups (+ core), e.g. a briefing
+    to [mail, calendar, reminders] so it can't pick the wrong tool.
     Returns the final answer text.
     """
-    global _profile
+    global _profile, _SCHEMAS_OVERRIDE
     if _profile is None:
         _profile = _load_profile() if _PROFILE_PATH.exists() else {}
+    _SCHEMAS_OVERRIDE = schemas_for_groups(tool_groups) if tool_groups else None
 
     # Resolve the context window the same way the REPL does (server / config).
     global CONTEXT_WINDOW
@@ -1216,9 +1255,25 @@ def run_once(prompt: str, sink: str = "stdout", name: str = "wisp") -> str:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{name}.log"
 
-    messages = [{"role": "system", "content": _build_system_prompt(_profile)}]
     import contextlib
     from datetime import datetime
+
+    # Builtin (deterministic) task — no LLM, no hallucination. Used for the
+    # morning briefing so unread counts/calendar/reminders are always real.
+    if builtin:
+        fn = _BUILTINS.get(builtin)
+        answer = fn() if fn else f"error: unknown builtin '{builtin}'"
+        if sink == "stdout":
+            print(answer)
+        elif sink == "notify":
+            _sink_notify(name, answer); _sink_file(name, answer)
+        elif sink == "file":
+            print(f"saved: {_sink_file(name, answer)}")
+        elif sink == "telegram":
+            _telegram_send(answer); _sink_file(name, answer)
+        return answer
+
+    messages = [{"role": "system", "content": _build_system_prompt(_profile)}]
 
     if sink == "stdout":
         # ad-hoc/interactive use: redirect decoration to the log, deliver the
@@ -1229,6 +1284,7 @@ def run_once(prompt: str, sink: str = "stdout", name: str = "wisp") -> str:
                 answer = run_agent(prompt, messages, reflect=False,
                                    max_turns=HEADLESS_MAX_TURNS)
         print(answer or "(no output)")
+        _SCHEMAS_OVERRIDE = None
         return answer or ""
 
     # Scheduled run (notify/file): bound it with a wall-clock timeout so a slow
@@ -1264,6 +1320,7 @@ def run_once(prompt: str, sink: str = "stdout", name: str = "wisp") -> str:
     elif sink == "telegram":
         _telegram_send(answer)
         _sink_file(name, answer)   # keep a copy on disk too
+    _SCHEMAS_OVERRIDE = None
     return answer
 
 
@@ -1511,7 +1568,8 @@ def _cli_run(argv: list[str]) -> None:
         j = _sched.get_job(job)
         if not j:
             print(f"error: no scheduled job named '{job}'"); sys.exit(1)
-        run_once(j["prompt"], j.get("sink", "notify"), name=j["name"])
+        run_once(j.get("prompt", ""), j.get("sink", "notify"), name=j["name"],
+                 tool_groups=j.get("tool_groups"), builtin=j.get("builtin"))
     else:
         prompt = " ".join(prompt_parts).strip()
         if not prompt:

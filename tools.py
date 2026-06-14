@@ -3344,3 +3344,13 @@ def active_schemas(disabled_groups) -> list[dict]:
         return SCHEMAS
     return [sc for sc in SCHEMAS
             if _group_of(sc["function"]["name"]) not in disabled]
+
+
+def schemas_for_groups(allowed_groups) -> list[dict]:
+    """Return ONLY the tools in `allowed_groups` plus core (always included).
+    Used to lock a scheduled/headless job to a small, safe tool set — e.g. a
+    morning briefing gets just mail/calendar/reminders, so it can't wander into
+    daily_briefing or the browser."""
+    allowed = {g for g in (allowed_groups or ())} | {"core"}
+    return [sc for sc in SCHEMAS
+            if _group_of(sc["function"]["name"]) in allowed]

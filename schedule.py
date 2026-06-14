@@ -144,9 +144,10 @@ def _uninstall(name: str) -> None:
 # ── CRUD (used by the schedule_* tools and the CLI) ──────────────────────────
 
 def add_job(name: str, prompt: str, schedule: str,
-            sink: str = "notify", enabled: bool = True) -> str:
-    if not name or not prompt or not schedule:
-        return "error: name, prompt and schedule are required"
+            sink: str = "notify", enabled: bool = True,
+            tool_groups: list | None = None, builtin: str | None = None) -> str:
+    if not name or not (prompt or builtin) or not schedule:
+        return "error: name, schedule and (prompt or builtin) are required"
     if sink not in _VALID_SINKS:
         return f"error: sink must be one of {', '.join(sorted(_VALID_SINKS))}"
     if _to_calendar(schedule) is None:
@@ -155,10 +156,15 @@ def add_job(name: str, prompt: str, schedule: str,
     data = _load()
     jobs = data.setdefault("jobs", [])
     jobs[:] = [j for j in jobs if j.get("name") != name]  # replace if exists
-    jobs.append({
+    job = {
         "name": name, "prompt": prompt, "schedule": schedule,
         "sink": sink, "enabled": enabled, "allow_outward": False,
-    })
+    }
+    if tool_groups:
+        job["tool_groups"] = list(tool_groups)
+    if builtin:
+        job["builtin"] = builtin
+    jobs.append(job)
     _save(data)
     if enabled:
         r = _install(name)

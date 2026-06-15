@@ -13,6 +13,7 @@ gateway-specific part is the transport (Telegram getUpdates/sendMessage).
 
 from __future__ import annotations
 
+import os
 import plistlib
 import subprocess
 import sys
@@ -116,13 +117,53 @@ def uninstall() -> str:
     return "gateway not installed"
 
 
+def status() -> str:
+    r = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if _LABEL in line:
+            pid = line.split()[0]
+            return (f"running (pid {pid})" if pid != "-"
+                    else "loaded but not running")
+    installed = "installed" if _plist_path().exists() else "not installed"
+    return f"stopped ({installed})"
+
+
+def start() -> str:
+    p = _plist_path()
+    if not p.exists():
+        return "not installed — run: agent.py gateway install"
+    r = subprocess.run(["launchctl", "load", str(p)], capture_output=True, text=True)
+    return "ok: started" if r.returncode == 0 else "already running"
+
+
+def stop() -> str:
+    p = _plist_path()
+    if not p.exists():
+        return "not installed"
+    subprocess.run(["launchctl", "unload", str(p)], capture_output=True)
+    return "ok: stopped (auto-starts again at next login; use uninstall to remove)"
+
+
+def restart() -> str:
+    r = subprocess.run(
+        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{_LABEL}"],
+        capture_output=True, text=True)
+    if r.returncode == 0:
+        return "ok: restarted"
+    p = _plist_path()                      # fallback: reload
+    subprocess.run(["launchctl", "unload", str(p)], capture_output=True)
+    subprocess.run(["launchctl", "load", str(p)], capture_output=True)
+    return "ok: restarted (reloaded)"
+
+
 def cli(argv: list[str]) -> None:
     cmd = argv[0] if argv else "run"
+    actions = {"run": run, "install": install, "uninstall": uninstall,
+               "status": status, "start": start, "stop": stop, "restart": restart}
     if cmd == "run":
         run()
-    elif cmd == "install":
-        print(install())
-    elif cmd == "uninstall":
-        print(uninstall())
+    elif cmd in actions:
+        print(actions[cmd]())
     else:
-        print("usage: agent.py gateway [run | install | uninstall]")
+        print("usage: agent.py gateway "
+              "[run | install | uninstall | status | start | stop | restart]")

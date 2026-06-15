@@ -180,6 +180,24 @@ The `daily_briefing` tool fetches, filters, and summarises global news into a si
 
 ## Development Log
 
+### v1.4 — Unified daemon (scheduler runs inside the gateway)
+
+Folded the scheduler into the gateway so there is **one** long-lived process
+managing both chat and timed tasks (matching how agents like hermes/openclaw do
+it), instead of separate launchd jobs per schedule.
+
+- The gateway runs a scheduler tick loop (every 30s) alongside the Telegram
+  poll. `schedule.due_jobs()` matches jobs by "most recent due time > last run",
+  so a slot missed while the Mac slept fires on the next wake tick (catch-up),
+  and a persisted state file prevents double-firing across restarts.
+- No more per-job launchd plists — only the gateway is a LaunchAgent. Adding a
+  job just writes `schedule.yaml`; the running gateway picks it up next tick.
+- A single run-lock serializes scheduled runs and chat replies so two tasks
+  never hit Mail.app/EventKit at once (that wedged Mail in testing).
+- Scheduled-job failures are reported to you over Telegram.
+- `wisp` launcher: short CLI (`wisp gateway status`, `wisp schedule list`)
+  instead of `python3.11 agent.py …`.
+
 ### v1.3 — Telegram gateway
 
 Chat with wisp from your phone, and let scheduled jobs deliver to Telegram.

@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-wisp scheduler — define recurring agent tasks that run headlessly via launchd.
+wisp scheduler — recurring tasks, driven by the gateway's in-process tick loop.
 
-A job = a natural-language prompt + a schedule + an output sink. Jobs live in
-~/wisp/schedule.yaml; each enabled job gets a LaunchAgent plist that invokes
-`agent.py run --job <name>` at the scheduled time. launchd (not cron) because it
-is macOS-native, catches up missed runs after sleep, and runs in the user's GUI
-session so Mail/Calendar/Reminders/notification access works.
+A job = a prompt (or builtin) + a schedule + an output sink, stored in
+~/wisp/schedule.yaml. The gateway daemon (gateway.py) calls due_jobs() every
+tick and fires whatever is due, so there is ONE long-lived process managing both
+chat and schedules — no per-job launchd plists. Tick-based matching means a job
+missed while the Mac slept is fired on the next wake-up tick (catch-up), and a
+small persisted state file prevents double-firing across restarts.
 """
 
 from __future__ import annotations
 
-import plistlib
+import json
 import subprocess
-import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
 
 _HOME       = Path("~/wisp").expanduser()
 _SCHED_FILE = _HOME / "schedule.yaml"
-_LOG_DIR    = _HOME / "logs"
+_STATE_FILE = _HOME / ".schedule_state.json"
 _LAUNCH_DIR = Path("~/Library/LaunchAgents").expanduser()
 _LABEL_PFX  = "com.wisp."
-_AGENT_PY   = str(Path(__file__).resolve().parent / "agent.py")
-_PYTHON     = sys.executable
 
 _VALID_SINKS = {"notify", "file", "stdout", "telegram"}
 
@@ -54,12 +53,12 @@ def get_job(name: str) -> dict | None:
     return None
 
 
-# ── Schedule parsing → launchd StartCalendarInterval ─────────────────────────
+# ── Schedule parsing ─────────────────────────────────────────────────────────
 
 def _to_calendar(sched: str):
-    """'HH:MM' (daily) or cron 'M H D Mon Wday' (with * = any) → launchd dict.
-    Returns None on anything we can't safely express. The minute must be
-    concrete (a '*' minute would fire 60×/hour)."""
+    """'HH:MM' (daily) or cron 'M H D Mon Wday' (with * = any) → a dict with
+    Minute/Hour and optional Day/Month/Weekday. None on anything unparseable.
+    The minute must be concrete (a '*' minute would mean every minute)."""
     s = (sched or "").strip()
     if ":" in s and len(s.split()) == 1:
         try:
@@ -76,7 +75,7 @@ def _to_calendar(sched: str):
         return None
     minute, hour, day, month, weekday = parts
     if minute == "*":
-        return None  # refuse every-minute schedules
+        return None
     cal: dict = {}
     spec = [(minute, "Minute", 0, 59), (hour, "Hour", 0, 23),
             (day, "Day", 1, 31), (month, "Month", 1, 12),
@@ -93,49 +92,90 @@ def _to_calendar(sched: str):
     return cal or None
 
 
-# ── launchd install / uninstall ──────────────────────────────────────────────
-
-def _plist_path(name: str) -> Path:
-    return _LAUNCH_DIR / f"{_LABEL_PFX}{name}.plist"
-
-
-def _install(name: str) -> str:
-    job = get_job(name)
-    if not job:
-        return f"error: no job '{name}'"
-    cal = _to_calendar(job.get("schedule", ""))
-    if cal is None:
-        return f"error: bad schedule '{job.get('schedule')}'"
-    _LAUNCH_DIR.mkdir(parents=True, exist_ok=True)
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    # run_once owns <name>.log (the run transcript); launchd writes only its own
-    # level (crashes/import errors before run_once) to a separate file so the two
-    # don't fight over the same handle.
-    launchd_log = str(_LOG_DIR / f"{name}.launchd.log")
-    plist = {
-        "Label": f"{_LABEL_PFX}{name}",
-        "ProgramArguments": [_PYTHON, _AGENT_PY, "run", "--job", name],
-        "StartCalendarInterval": cal,
-        "StandardOutPath": launchd_log,
-        "StandardErrorPath": launchd_log,
-        "RunAtLoad": False,
-        "EnvironmentVariables": {
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
-        },
-    }
-    path = _plist_path(name)
-    with open(path, "wb") as f:
-        plistlib.dump(plist, f)
-    # reload so changes take effect (unload is harmless if not loaded)
-    subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
-    r = subprocess.run(["launchctl", "load", str(path)], capture_output=True, text=True)
-    if r.returncode != 0:
-        return f"error: launchctl load failed: {r.stderr.strip()}"
-    return "ok"
+def _most_recent_due(now: datetime, cal: dict):
+    """Most recent datetime <= now that matches the calendar spec, or None.
+    Searches back up to ~1 year (covers daily/weekly/monthly/yearly)."""
+    minute = cal.get("Minute", 0)
+    hour   = cal.get("Hour", 0)
+    for back in range(0, 367):
+        d = now - timedelta(days=back)
+        if "Month" in cal and d.month != cal["Month"]:
+            continue
+        if "Day" in cal and d.day != cal["Day"]:
+            continue
+        if "Weekday" in cal:
+            # launchd weekday: 0/7=Sun, 1=Mon..6=Sat → Python weekday() Mon0..Sun6
+            py_wd = 6 if cal["Weekday"] in (0, 7) else cal["Weekday"] - 1
+            if d.weekday() != py_wd:
+                continue
+        cand = d.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if cand <= now:
+            return cand
+    return None
 
 
-def _uninstall(name: str) -> None:
-    path = _plist_path(name)
+# ── Tick state (prevents double-fire; enables sleep catch-up) ─────────────────
+
+def _load_state() -> dict:
+    if _STATE_FILE.exists():
+        try:
+            return json.loads(_STATE_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_state(state: dict) -> None:
+    _HOME.mkdir(parents=True, exist_ok=True)
+    try:
+        _STATE_FILE.write_text(json.dumps(state))
+    except Exception:
+        pass
+
+
+def due_jobs(now: datetime | None = None) -> list[dict]:
+    """Return the enabled jobs that are due to fire now, marking them fired.
+
+    A never-seen job is seeded with `now` (so a fresh start doesn't retroactively
+    fire a slot that already passed today). Thereafter a job fires when its most
+    recent scheduled time is later than its last run — which also catches up a
+    slot missed while the Mac was asleep.
+    """
+    now = now or datetime.now()
+    state = _load_state()
+    out: list[dict] = []
+    changed = False
+    for j in list_jobs():
+        if not j.get("enabled"):
+            continue
+        cal = _to_calendar(j.get("schedule", ""))
+        if not cal:
+            continue
+        name = j["name"]
+        last = state.get(name)
+        if last is None:
+            state[name] = now.isoformat()        # seed, no retro-fire
+            changed = True
+            continue
+        try:
+            last_dt = datetime.fromisoformat(last)
+        except Exception:
+            last_dt = None
+        due = _most_recent_due(now, cal)
+        if due and (last_dt is None or last_dt < due):
+            out.append(j)
+            state[name] = now.isoformat()
+            changed = True
+    if changed:
+        _save_state(state)
+    return out
+
+
+# ── Legacy launchd cleanup (migration off per-job plists) ────────────────────
+
+def _remove_legacy_plist(name: str) -> None:
+    """Unload + delete a per-job LaunchAgent from the old design, if present."""
+    path = _LAUNCH_DIR / f"{_LABEL_PFX}{name}.plist"
     if path.exists():
         subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
         path.unlink()
@@ -166,10 +206,9 @@ def add_job(name: str, prompt: str, schedule: str,
         job["builtin"] = builtin
     jobs.append(job)
     _save(data)
-    if enabled:
-        r = _install(name)
-        if r != "ok":
-            return r
+    _remove_legacy_plist(name)   # in case an old per-job plist exists
+    # reset state so the new/edited job is seeded fresh on the next tick
+    st = _load_state(); st.pop(name, None); _save_state(st)
     return f"ok: job '{name}' saved — {schedule}, sink={sink}, enabled={enabled}"
 
 
@@ -178,9 +217,10 @@ def remove_job(name: str) -> str:
     jobs = data.get("jobs", [])
     if not any(j.get("name") == name for j in jobs):
         return f"error: no job '{name}'"
-    _uninstall(name)
+    _remove_legacy_plist(name)
     data["jobs"] = [j for j in jobs if j.get("name") != name]
     _save(data)
+    st = _load_state(); st.pop(name, None); _save_state(st)
     return f"ok: removed job '{name}'"
 
 
@@ -191,10 +231,8 @@ def set_enabled(name: str, enabled: bool) -> str:
         return f"error: no job '{name}'"
     job["enabled"] = enabled
     _save(data)
-    if enabled:
-        return f"ok: enabled '{name}' — {_install(name)}"
-    _uninstall(name)
-    return f"ok: disabled '{name}'"
+    st = _load_state(); st.pop(name, None); _save_state(st)  # reseed on re-enable
+    return f"ok: {'enabled' if enabled else 'disabled'} '{name}'"
 
 
 def format_jobs() -> str:
@@ -204,12 +242,13 @@ def format_jobs() -> str:
     lines = []
     for j in jobs:
         state = "on " if j.get("enabled") else "off"
+        what  = j.get("builtin") or (j.get("prompt", "")[:80])
         lines.append(f"[{state}] {j['name']}  ({j.get('schedule')}, sink={j.get('sink')})\n"
-                     f"        {j.get('prompt', '')[:80]}")
+                     f"        {what}")
     return "\n".join(lines)
 
 
-# ── CLI: `agent.py schedule …` ───────────────────────────────────────────────
+# ── CLI: `wisp schedule …` ───────────────────────────────────────────────────
 
 def cli(argv: list[str]) -> None:
     cmd = argv[0] if argv else "list"
@@ -222,11 +261,6 @@ def cli(argv: list[str]) -> None:
         print(set_enabled(rest[0], True))
     elif cmd in ("off", "disable") and rest:
         print(set_enabled(rest[0], False))
-    elif cmd == "install":
-        # re-sync all enabled jobs' plists (e.g. after moving the repo)
-        for j in list_jobs():
-            if j.get("enabled"):
-                print(f"{j['name']}: {_install(j['name'])}")
     else:
-        print("usage: agent.py schedule [list | remove <name> | "
-              "on <name> | off <name> | install]")
+        print("usage: wisp schedule [list | remove <name> | on <name> | off <name>]\n"
+              "(scheduled jobs run inside the gateway — start it with: wisp gateway install)")

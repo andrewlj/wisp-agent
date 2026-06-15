@@ -31,8 +31,36 @@ _PYTHON     = sys.executable
 _API        = "https://api.telegram.org/bot{token}/{method}"
 
 
+# One run at a time across chat + scheduler, so two tasks never hit Mail.app /
+# EventKit concurrently (that wedged Mail in testing).
+import threading
+_RUN_LOCK = threading.Lock()
+
+
+def _scheduler_loop() -> None:
+    """Tick every 30s: fire any scheduled job that is due. Runs inside the
+    gateway process so there is a single daemon managing chat + schedules.
+    Catches up a slot missed while the Mac slept (see schedule.due_jobs)."""
+    import agent, schedule
+    while True:
+        try:
+            for job in schedule.due_jobs():
+                with _RUN_LOCK:
+                    try:
+                        agent.run_once(
+                            job.get("prompt", ""), job.get("sink", "notify"),
+                            name=job["name"], tool_groups=job.get("tool_groups"),
+                            builtin=job.get("builtin"))
+                    except Exception as e:
+                        agent._telegram_send(f"⚠️ 定时任务 {job['name']} 失败：{e}")
+        except Exception:
+            pass
+        time.sleep(30)
+
+
 def run() -> None:
-    """The long-poll loop. Blocks forever (launchd keeps it alive)."""
+    """Gateway main loop: Telegram long-poll + a scheduler tick thread. Blocks
+    forever (launchd KeepAlive keeps it alive)."""
     import agent
     token   = agent.TELEGRAM_BOT_TOKEN
     user_id = agent.TELEGRAM_USER_ID
@@ -43,6 +71,9 @@ def run() -> None:
     def api(method, **params):
         return requests.get(_API.format(token=token, method=method),
                             params=params, timeout=60)
+
+    # Start the in-process scheduler.
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
 
     agent._telegram_send("🤖 wisp 网关已上线，随时为你服务。")
     offset = None
@@ -69,9 +100,8 @@ def run() -> None:
                 continue
             agent._telegram_send("⏳ 收到，处理中…")
             try:
-                # run_once(sink=telegram) runs headlessly (timeout-guarded) and
-                # sends the answer back to the configured user.
-                agent.run_once(text, sink="telegram", name="telegram")
+                with _RUN_LOCK:   # serialize with scheduled runs
+                    agent.run_once(text, sink="telegram", name="telegram")
             except Exception as e:
                 agent._telegram_send(f"出错了：{e}")
 

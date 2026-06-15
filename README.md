@@ -12,11 +12,13 @@ A lightweight local macOS intelligent assistant powered by any OpenAI-compatible
 - **Self-learning** — agent records mistakes automatically; post-task reflection writes rules to `knowledge.md`
 - **Session persistence** — save, restore, and browse conversation history
 - **Task checkpoint system** — multi-step task tracking with recovery support
-- **Context compression** — auto-summarises old messages when context grows large; errors preserved verbatim
+- **Context compression** — auto-summarises old messages at a % of the model's context window (auto-detected from the server); errors preserved verbatim
+- **Telegram gateway** — chat with wisp from your phone; a single daemon also runs scheduled tasks
+- **Scheduler** — recurring tasks (e.g. a morning briefing) delivered to notification / file / Telegram
 - **Daily briefing** — config-driven HTML news report from global sources (`briefing.yaml`)
 - **Workspace sandbox** — all file outputs confined to `~/wisp/workspace`; writes outside are blocked
 - **LLM retry** — exponential-backoff retry on connection errors and 5xx; stalled streams time out cleanly
-- **Debug mode** — per-tool timing, real token counts, task summary
+- **Debug mode** — full args, untruncated results, real token counts & timing written to `~/wisp/logs/debug.log` (console stays concise)
 
 ## Requirements
 
@@ -51,20 +53,29 @@ server:
 model:
   name: "Qwen3.5-9B-MLX-8bit"
   max_tokens: 4096
-  vision: false   # set true for VL models (e.g. Qwen2.5-VL)
+  context_window: 0         # 0 = auto-detect from the server; capped by min(this, server)
+  vision: false             # set true for VL models (e.g. Qwen2.5-VL)
 
 agent:
   max_turns: 20
   bash_timeout: 30
-  browser_timeout: 30       # seconds before browser ops time out
+  browser_timeout: 30           # seconds before browser ops time out
   workspace: "~/wisp/workspace"
   strict_workspace: true
-  context_limit: 6000       # estimated tokens before compression kicks in
-  context_keep_recent: 6    # recent messages kept verbatim during compression
+  compress_at_percent: 75       # compress context at this % of the context window
+  context_keep_recent: 6        # recent messages kept verbatim during compression
+  max_tool_result_chars: 4000   # cap each tool result so it can't blow past the window
+  headless_timeout: 240         # wall-clock cap (s) for scheduled/headless runs
+  disabled_tool_groups: []      # e.g. [browser, travel] to trim the menu for small models
 
-# Optional — only needed for flight_search / hotel_search
+# Optional — only needed for flight_search / hotel_search / web_search
 serpapi:
   api_key: ""               # https://serpapi.com (100 free searches/month)
+
+# Optional — chat with wisp from your phone + deliver schedules to Telegram
+telegram:
+  bot_token: ""             # from @BotFather
+  user_id: 0                # your numeric id (from @userinfobot); only this user is served
 ```
 
 **3. Start your local LLM server**
@@ -73,14 +84,25 @@ serpapi:
 mlx_lm.server --model <your-model-path> --port 8000
 ```
 
-**4. Run**
+**4. (Optional) Install the `wisp` launcher**
 
 ```bash
-# Interactive mode (multi-turn REPL)
-python agent.py
+ln -sf "$PWD/wisp" /opt/homebrew/bin/wisp   # short command instead of `python agent.py`
+```
 
-# One-shot mode
-python agent.py "Count how many files are on my Desktop"
+**5. Run**
+
+```bash
+wisp                                    # interactive REPL  (or: python agent.py)
+wisp run "Count the files on my Desktop"  # one-shot headless task
+
+# Telegram gateway (chat from your phone; also runs scheduled tasks)
+wisp gateway install                    # start as a persistent background daemon
+wisp gateway status | restart | stop | start | uninstall
+
+# Scheduled tasks (run by the gateway)
+wisp schedule list
+wisp schedule on <name> | off <name> | remove <name>
 ```
 
 ## REPL commands
@@ -96,7 +118,7 @@ python agent.py "Count how many files are on my Desktop"
 | `/resume <task-id>` | Resume an interrupted multi-step task |
 | `/knowledge` | Show learned tool usage rules |
 | `/knowledge forget <keyword>` | Remove rules containing keyword |
-| `/debug` | Toggle verbose output (tool timing, real tokens, task summary) |
+| `/debug` | Toggle debug logging — full args, untruncated results, tokens & timing → `~/wisp/logs/debug.log` |
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
@@ -130,8 +152,9 @@ All persistent data lives under `~/wisp/`:
 │   └── briefings/      # scheduled-task output (markdown)
 ├── sessions/           # saved conversation histories
 ├── tasks/              # multi-step task checkpoints
-├── logs/               # per-job run logs for scheduled tasks
+├── logs/               # gateway.log, debug.log, per-task run logs
 ├── schedule.yaml       # scheduled job definitions
+├── .schedule_state.json # last-run state (prevents double-firing)
 └── knowledge.md        # learned tool usage rules (grows over time)
 ```
 
@@ -153,6 +176,8 @@ wisp-agent/
 ├── profile.example.yaml  # Profile template
 ├── config.yaml           # Server/model config (git-ignored)
 ├── config.example.yaml   # Config template
+├── wisp                  # CLI launcher (symlink onto PATH)
+├── test/                 # unit tests (test_tools.py)
 ├── requirements.txt
 └── LICENSE
 ```
@@ -454,7 +479,7 @@ across multiple accounts (Gmail, Hotmail/Outlook, iCloud) in mixed languages:
 
 ## Roadmap
 
-- [x] Scheduler — recurring headless tasks via launchd (v1.1)
+- [x] Scheduler — recurring headless tasks (v1.1; folded into the gateway's tick loop in v1.4)
 - [x] Gateway — Telegram bot adapter for remote control, reusing the headless `run_once` core (v1.3)
 - [ ] Contacts integration — resolve names → addresses (needs a one-time Contacts permission grant)
 - [ ] Tool set expansion — more reliable automation coverage

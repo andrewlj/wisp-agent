@@ -141,7 +141,7 @@ All persistent data lives under `~/wisp/`:
 wisp-agent/
 ├── agent.py              # Main loop, REPL, headless run_once, context compression, API
 ├── tools.py              # All tool schemas and implementations
-├── schedule.py           # Recurring jobs via launchd (Scheduler)
+├── schedule.py           # Recurring jobs (tick-based, run by the gateway)
 ├── gateway.py            # Telegram gateway (chat with wisp from your phone)
 ├── briefing.py           # Daily news briefing generator (processing only)
 ├── briefing.yaml         # Briefing sources, domains, and filters (edit freely)
@@ -239,7 +239,7 @@ wisp can now run tasks on a schedule, not just on demand.
 - This is deliberately the same entrypoint a remote Gateway would call, so the
   later Telegram/socket work reuses it instead of conflicting.
 
-**Scheduling via launchd**
+**Scheduling via launchd** *(superseded by v1.4 — now a tick loop inside the gateway, no per-job plists)*
 - Jobs live in `~/wisp/schedule.yaml` (name, prompt, schedule, sink,
   `allow_outward: false`). `schedule.py` parses `HH:MM`/cron into a launchd
   `StartCalendarInterval` and installs a LaunchAgent per enabled job.

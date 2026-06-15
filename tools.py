@@ -663,16 +663,16 @@ SCHEMAS: list[dict] = [
 
     _fn("schedule_add",
         "Create or update a recurring task that runs automatically in the "
-        "background. Use when the user wants something done on a schedule (e.g. "
-        "'every morning summarize my unread email and today's calendar'). The "
-        "task runs headlessly and delivers its result via the chosen sink. Keep "
-        "the prompt read-only (summarize/list) — scheduled tasks must not send "
-        "or delete.",
+        "background — use this whenever the user asks for something to happen "
+        "regularly or at a set time (e.g. '每天早上提醒我…', 'every weekday at 9 "
+        "summarize my email', '每晚10点…'). The task runs headlessly and delivers "
+        "its result via the sink. Keep the prompt read-only (summarize/list); "
+        "scheduled tasks must not send or delete.",
         {
-            "name":     {"type": "string", "description": "Short unique id, e.g. 'morning-briefing'."},
-            "prompt":   {"type": "string", "description": "What the task should do, as a natural-language instruction. Read-only: summarize/list, never send/delete."},
-            "schedule": {"type": "string", "description": "When to run: 'HH:MM' for daily (e.g. '08:00'), or cron 'M H * * *' / 'M H * * D' where the minute is a number and D is a single weekday 0-6 (0=Sun)."},
-            "sink":     {"type": "string", "description": "Output: 'notify' (macOS notification + saved file; default), 'file', or 'stdout'."},
+            "name":     {"type": "string", "description": "Short unique id, e.g. 'water-reminder' or 'morning-brief'."},
+            "prompt":   {"type": "string", "description": "What the task does, as a natural-language instruction (read-only). E.g. '提醒我喝水' or '汇总我的未读邮件和今日日程'."},
+            "schedule": {"type": "string", "description": "When: 'HH:MM' for daily (e.g. '22:00'), or cron 'M H * * *' / 'M H * * D' (minute is a number; D = single weekday 0-6, 0=Sun)."},
+            "sink":     {"type": "string", "description": "Where the result goes: 'telegram' (to the user's phone — best when the request came via Telegram), 'notify' (macOS notification, default), 'file', or 'stdout'."},
         }, ["name", "prompt", "schedule"]),
 
     _fn("schedule_remove", "Delete a scheduled task by name.",

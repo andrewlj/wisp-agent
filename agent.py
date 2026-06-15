@@ -147,6 +147,8 @@ def _build_system_prompt(profile: dict) -> str:
         act_lines.append("- Use `browser_*` for interactive web tasks (forms, logins, SPAs), not `http_get`.")
     if "travel" not in disabled:
         act_lines.append("- Use `flight_search`/`hotel_search` for flights/hotels, not `browser_*`.")
+    act_lines.append("- If the user wants something done regularly or at a set time "
+                     "(每天/每周/定时/提醒我…), use `schedule_add` to create a recurring task.")
     act_lines.append("- Call `done` as soon as the task is fully complete.")
     act_lines.append(
         "- Date/time tasks: FIRST run `bash date '+%Y-%m-%d %H:%M %A'`. macOS date "

@@ -474,7 +474,7 @@ SCHEMAS: list[dict] = [
         "List emails from macOS Mail.app. Works across all configured accounts "
         "(Gmail, Hotmail, iCloud, etc.) or a specific account. "
         "Each line ends with 'id:<message-id>' — pass that exact id as message_id "
-        "to mail_read/mail_delete/mail_move/mail_junk to act on the message reliably "
+        "to mail_read/mail_delete/mail_move to act on the message reliably "
         "(do NOT retype the subject, which often fails to match). "
         "Use unread_only=true to fetch only new emails.",
         {
@@ -497,19 +497,9 @@ SCHEMAS: list[dict] = [
         }, []),
 
     _fn("mail_delete",
-        "Move an email to Trash in macOS Mail.app. Safe delete — recoverable from Trash. "
-        "Prefer message_id (from mail_list) to locate the message.",
-        {
-            "message_id": {"type": "string", "description": "Exact message id from mail_list output (preferred — reliable)."},
-            "subject": {"type": "string", "description": "Fallback: email subject (partial match). Brittle — use message_id when possible."},
-            "sender":  {"type": "string", "description": "Optional: sender to narrow the match."},
-            "account": {"type": "string", "description": "Optional: account email address."},
-            "mailbox": {"type": "string", "description": "Source folder. Default: 'INBOX'."},
-        }, []),
-
-    _fn("mail_junk",
-        "Mark an email as junk/spam — moves it to the account's Junk folder so the "
-        "provider learns to filter similar mail. Use this for ads and promotional spam. "
+        "Delete an email OR clear ads/spam — both move it to the Junk folder "
+        "(垃圾邮件), wisp's single bin. Use for 'delete this', '处理广告', "
+        "'标记为垃圾邮件'. Recoverable until the user empties Junk in Mail. "
         "Prefer message_id (from mail_list) to locate the message.",
         {
             "message_id": {"type": "string", "description": "Exact message id from mail_list output (preferred — reliable)."},
@@ -2822,36 +2812,15 @@ end tell
 
 def tool_mail_delete(subject: str = "", sender: str = "", account: str = "",
                      mailbox: str = "INBOX", message_id: str = "") -> str:
-    """Move an email to Trash in macOS Mail.app.
-
-    Locate by `message_id` (preferred, from mail_list output) or by subject.
+    """Move an email to the Junk folder (垃圾邮件) — wisp's single bin for
+    deleting mail and clearing ads/spam. Recoverable until you empty Junk in
+    Mail (Junk can be emptied manually; the Trash/废纸篓 often can't, which is
+    why everything goes here). Locate by `message_id` (preferred) or subject.
     """
-    where = _mail_where(subject, sender, message_id)
-    s_escaped = (message_id or subject).replace('"', '\\"')
-    mbox_find = _mail_mbox_find_script(mailbox, account)
-
-    script = f"""
-tell application "Mail"
-    {mbox_find}
-    if (count of foundMboxes) = 0 then
-        return "error: mailbox not found"
-    end if
-    repeat with theMbox in foundMboxes
-        try
-            set msgs to (messages of theMbox {where})
-            if (count of msgs) > 0 then
-                delete item 1 of msgs
-                return "ok"
-            end if
-        end try
-    end repeat
-    return "error: no message found matching \\"{s_escaped}\\""
-end tell
-"""
-    result = _osascript_clean(script, timeout=30)
-    if result == "ok":
-        return f"ok: moved '{message_id or subject}' to Trash"
-    return result
+    return tool_mail_move(
+        subject=subject, sender=sender, account=account,
+        source_mailbox=mailbox, target_mailbox="junk", message_id=message_id,
+    )
 
 
 def _mbox_target_resolver(target_mailbox: str) -> tuple[str, str]:
@@ -2967,19 +2936,6 @@ end tell
     if result == "ok":
         return f"ok: moved '{message_id or subject}' to {label}"
     return result
-
-
-def tool_mail_junk(subject: str = "", sender: str = "", account: str = "",
-                   mailbox: str = "INBOX", message_id: str = "") -> str:
-    """Mark an email as junk — move it to the account's Junk/Spam folder.
-
-    Convenience wrapper over mail_move for cleaning ads/spam. Locate by
-    `message_id` (preferred) or subject.
-    """
-    return tool_mail_move(
-        subject=subject, sender=sender, account=account,
-        source_mailbox=mailbox, target_mailbox="junk", message_id=message_id,
-    )
 
 
 def tool_mail_move_all(source_mailbox: str, target_mailbox: str,

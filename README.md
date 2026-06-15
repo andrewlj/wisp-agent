@@ -122,7 +122,7 @@ wisp schedule on <name> | off <name> | remove <name>
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (61 total)
+## Tools (60 total)
 
 | Category | Tools |
 |----------|-------|
@@ -135,7 +135,7 @@ wisp schedule on <name> | off <name> | remove <name>
 | Reminders | `reminders_list`, `reminders_add`, `reminders_complete`, `reminders_delete` |
 | Calendar | `calendar_list`, `calendar_add`, `calendar_delete` |
 | Notes | `notes_list`, `notes_read`, `notes_create`, `notes_append`, `notes_delete` |
-| Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_send`, `mail_draft`, `mail_reply`, `mail_delete`, `mail_junk`, `mail_move`, `mail_move_all` |
+| Mail | `mail_accounts`, `mail_list`, `mail_read`, `mail_send`, `mail_draft`, `mail_reply`, `mail_delete` (→ Junk), `mail_move`, `mail_move_all` |
 | Task | `task_init`, `task_step_done`, `task_step_fail` |
 | Scheduler | `schedule_list`, `schedule_add`, `schedule_remove` |
 | News | `daily_briefing` |

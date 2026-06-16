@@ -58,10 +58,46 @@ def _scheduler_loop() -> None:
         time.sleep(30)
 
 
+def _new_session(agent) -> list:
+    """Fresh conversation for the Telegram chat (system slot only)."""
+    return [{"role": "system", "content": ""}]
+
+
+def _status_text(agent, session: list, started: float) -> str:
+    import schedule
+    from datetime import timedelta
+    up = timedelta(seconds=int(time.time() - started))
+    est = agent._estimate_tokens(session) + agent._schema_tokens()
+    win = agent.CONTEXT_WINDOW
+    ctx = f"~{est}/{win} ({est * 100 // win}%)" if win else f"~{est} tok"
+    jobs = [j for j in schedule.list_jobs() if j.get("enabled")]
+    msgs = max(0, len(session) - 1)
+    return ("📊 wisp 状态\n"
+            f"• 运行时长: {up}\n"
+            f"• 模型: {agent.MODEL}\n"
+            f"• 当前会话: {msgs} 条消息, 上下文 {ctx}\n"
+            f"• 定时任务: {len(jobs)} 个启用"
+            + ("\n  - " + "\n  - ".join(f"{j['name']} ({j.get('schedule')})" for j in jobs)
+               if jobs else ""))
+
+
+_HELP = ("我是 wisp，可多轮对话（记得上文）。直接发指令，例如：\n"
+         "• 看看我未读邮件 → 然后“删掉第二封”\n"
+         "• 今天和明天的日程\n"
+         "• 搜索都柏林天气\n"
+         "• 每晚10点提醒我睡觉\n\n"
+         "命令：\n"
+         "/new 开新会话（清空上下文）\n"
+         "/status 查看运行状态与上下文占用\n"
+         "/jobs 查看定时任务\n"
+         "/help 帮助")
+
+
 def run() -> None:
-    """Gateway main loop: Telegram long-poll + a scheduler tick thread. Blocks
-    forever (launchd KeepAlive keeps it alive)."""
+    """Gateway main loop: Telegram long-poll + a scheduler tick thread. Keeps a
+    persistent multi-turn session (auto-compressed). Blocks forever."""
     import agent
+    import schedule
     token   = agent.TELEGRAM_BOT_TOKEN
     user_id = agent.TELEGRAM_USER_ID
     if not token or not user_id:
@@ -72,10 +108,13 @@ def run() -> None:
         return requests.get(_API.format(token=token, method=method),
                             params=params, timeout=60)
 
-    # Start the in-process scheduler.
+    if agent.CONTEXT_WINDOW <= 0:        # so /status shows ctx %
+        agent.CONTEXT_WINDOW = agent._detect_context_window()
     threading.Thread(target=_scheduler_loop, daemon=True).start()
 
-    agent._telegram_send("🤖 wisp 网关已上线，随时为你服务。")
+    started = time.time()
+    session = _new_session(agent)        # persistent conversation across messages
+    agent._telegram_send("🤖 wisp 网关已上线。发 /help 看用法。")
     offset = None
     while True:
         try:
@@ -92,16 +131,23 @@ def run() -> None:
             text = (msg.get("text") or "").strip()
             if frm != str(user_id) or not text:
                 continue                            # serve only the owner
-            if text.lower() in ("/start", "/help"):
-                agent._telegram_send(
-                    "我是 wisp。直接发指令即可，例如：\n"
-                    "• 看看我未读邮件\n• 今天和明天的日程\n• 搜索都柏林天气\n"
-                    "• 给 X 起草一封邮件")
-                continue
-            agent._telegram_send("⏳ 收到，处理中…")
+
+            low = text.lower()
+            if low in ("/start", "/help"):
+                agent._telegram_send(_HELP); continue
+            if low in ("/new", "/reset"):
+                session = _new_session(agent)
+                agent._telegram_send("🆕 已开新会话，上下文已清空。"); continue
+            if low == "/status":
+                agent._telegram_send(_status_text(agent, session, started)); continue
+            if low == "/jobs":
+                agent._telegram_send("⏰ 定时任务\n" + schedule.format_jobs()); continue
+
+            agent._telegram_send("⏳ 处理中…")
             try:
-                with _RUN_LOCK:   # serialize with scheduled runs
-                    agent.run_once(text, sink="telegram", name="telegram")
+                with _RUN_LOCK:                      # serialize with scheduled runs
+                    answer = agent.run_session(text, session, log_name="telegram")
+                agent._telegram_send(answer or "(无输出)")
             except Exception as e:
                 agent._telegram_send(f"出错了：{e}")
 

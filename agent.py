@@ -1329,6 +1329,29 @@ def run_once(prompt: str, sink: str = "stdout", name: str = "wisp",
     return answer
 
 
+def run_session(text: str, messages: list, log_name: str = "telegram") -> str:
+    """Run the agent on a PERSISTENT message list (multi-turn), headless,
+    returning the final answer. Used by the gateway so a Telegram chat keeps
+    context across messages and auto-compresses (run_agent appends to messages
+    and calls _maybe_compress each turn). Runs synchronously — the caller
+    serializes — so no thread can mutate `messages` concurrently."""
+    global _profile, CONTEXT_WINDOW
+    if _profile is None:
+        _profile = _load_profile() if _PROFILE_PATH.exists() else {}
+    if CONTEXT_WINDOW <= 0:
+        CONTEXT_WINDOW = _detect_context_window()
+
+    import contextlib
+    from datetime import datetime
+    log_path = _WISP_HOME / "logs" / f"{log_name}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as logf:
+        logf.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} · {log_name} =====\n")
+        with contextlib.redirect_stdout(logf):
+            return run_agent(text, messages, reflect=False,
+                             max_turns=HEADLESS_MAX_TURNS) or ""
+
+
 # ── REPL helpers ──────────────────────────────────────────────────────────────
 
 def _print_sessions() -> None:

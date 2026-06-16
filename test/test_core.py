@@ -133,6 +133,21 @@ conv = [
 ]
 check("final answer from done result", agent._extract_final_answer(conv) == "FINAL")
 
+# ── long-term memory (use a temp file, don't touch ~/wisp) ───────────────────
+print("\nmemory (long-term facts)")
+import memory as _mem
+import tempfile
+_mem._MEMORY_PATH = Path(tempfile.mkdtemp()) / "memory.md"
+_mem._MEMORY_PATH.write_text(_mem._DEFAULT_CONTENT, encoding="utf-8")
+check("empty memory → load() returns ''", _mem.load() == "")
+check("add returns ok", _mem.add("我住在都柏林").startswith("ok: remembered"))
+check("dedup skips a near-duplicate", "skipped" in _mem.add("我住在都柏林"))
+_mem.add("我老板叫张三")
+check("load shows stored facts", "都柏林" in _mem.load() and "张三" in _mem.load())
+check("forget removes matching", "1" in _mem.forget("张三"))
+check("forgotten fact is gone", "张三" not in _mem.load())
+check("kept fact remains", "都柏林" in _mem.load())
+
 # ── tool gating: schemas_for_groups ──────────────────────────────────────────
 print("\ntools.schemas_for_groups")
 _names = [s["function"]["name"] for s in tools.schemas_for_groups(["mail"])]

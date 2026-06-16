@@ -667,6 +667,21 @@ SCHEMAS: list[dict] = [
 
     _fn("schedule_remove", "Delete a scheduled task by name.",
         {"name": {"type": "string", "description": "The job name to remove."}}, ["name"]),
+
+    # ── Long-term memory ─────────────────────────────────────────────────────
+    _fn("remember",
+        "Save a durable fact or preference about the user to long-term memory — "
+        "it persists across sessions/restarts and is recalled automatically. Use "
+        "whenever the user states something lasting about themselves (记住…/我的…/"
+        "以后…/我喜欢…), e.g. '我住在都柏林', '老板叫张三', '回复尽量简洁'. NOT for "
+        "one-off task details.",
+        {"fact": {"type": "string", "description": "One concise fact/preference about the user."}},
+        ["fact"]),
+
+    _fn("forget",
+        "Remove previously remembered facts that contain the keyword.",
+        {"keyword": {"type": "string", "description": "Keyword; all remembered items containing it are removed."}},
+        ["keyword"]),
 ]
 
 
@@ -3202,6 +3217,18 @@ def tool_schedule_add(name: str, prompt: str, schedule: str,
 def tool_schedule_remove(name: str) -> str:
     import schedule as _sched
     return _sched.remove_job(name)
+
+
+# ── Long-term memory ──────────────────────────────────────────────────────────
+
+def tool_remember(fact: str) -> str:
+    import memory as _memory
+    return _memory.add(fact)
+
+
+def tool_forget(keyword: str) -> str:
+    import memory as _memory
+    return _memory.forget(keyword)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

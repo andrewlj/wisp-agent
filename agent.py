@@ -65,11 +65,13 @@ _SCHEMAS_OVERRIDE = None
 from tools import init_workspace, init_browser_timeout, init_serpapi
 from briefing import init_briefing
 import knowledge as _knowledge
+import memory as _memory
 init_workspace(WORKSPACE, STRICT)
 init_browser_timeout(BROWSER_TO)
 init_briefing(BASE_URL, API_KEY, MODEL, WORKSPACE)
 init_serpapi(_cfg.get("serpapi", {}).get("api_key", ""))
 _knowledge.init_knowledge(WORKSPACE)
+_memory.init_memory(WORKSPACE)
 
 _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
 
@@ -129,6 +131,11 @@ def _build_system_prompt(profile: dict) -> str:
     if kb:
         parts.append(kb)
 
+    # 3b. Long-term personal memory (user facts/preferences via `remember`)
+    mem = _memory.load()
+    if mem:
+        parts.append(mem)
+
     # 4. Static environment rules — concise and ordered for small models.
     #    Tool-specific lines are pruned when their group is disabled, so the
     #    model is never told about tools it cannot see.
@@ -149,6 +156,8 @@ def _build_system_prompt(profile: dict) -> str:
         act_lines.append("- Use `flight_search`/`hotel_search` for flights/hotels, not `browser_*`.")
     act_lines.append("- If the user wants something done regularly or at a set time "
                      "(每天/每周/定时/提醒我…), use `schedule_add` to create a recurring task.")
+    act_lines.append("- When the user states a durable fact/preference about themselves "
+                     "(记住…/我的…/以后…/我喜欢…), call `remember` so it persists across sessions.")
     act_lines.append("- Call `done` as soon as the task is fully complete.")
     act_lines.append(
         "- Date/time tasks: FIRST run `bash date '+%Y-%m-%d %H:%M %A'`. macOS date "

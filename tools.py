@@ -587,7 +587,7 @@ SCHEMAS: list[dict] = [
         {
             "open_browser": {
                 "type":        "boolean",
-                "description": "Open the report in the default browser when done. Default true.",
+                "description": "Open the report in a browser when done. Default false (the report is always saved to disk). Set true ONLY when the user is at the computer and asks to open it — never for scheduled or Telegram runs.",
             },
             "sections": {
                 "type":        "array",
@@ -3150,7 +3150,7 @@ end tell
 
 # ── Daily briefing ───────────────────────────────────────────────────────────
 
-def tool_daily_briefing(open_browser: bool = True,
+def tool_daily_briefing(open_browser: bool = False,
                         sections: list | None = None) -> str:
     try:
         import briefing as _briefing

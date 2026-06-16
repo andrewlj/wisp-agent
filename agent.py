@@ -62,7 +62,7 @@ SCHEMAS_ACTIVE  = active_schemas(DISABLED_TOOL_GROUPS)
 _SCHEMAS_OVERRIDE = None
 
 # Initialise workspace sandbox, browser timeout, and briefing LLM config
-from tools import init_workspace, init_browser_timeout, init_serpapi
+from tools import init_workspace, init_browser_timeout, init_serpapi, init_telegram
 from briefing import init_briefing
 import knowledge as _knowledge
 import memory as _memory
@@ -72,6 +72,7 @@ init_briefing(BASE_URL, API_KEY, MODEL, WORKSPACE)
 init_serpapi(_cfg.get("serpapi", {}).get("api_key", ""))
 _knowledge.init_knowledge(WORKSPACE)
 _memory.init_memory(WORKSPACE)
+init_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID)
 
 _workspace_abs = str(Path(WORKSPACE).expanduser().resolve())
 
@@ -1110,6 +1111,7 @@ def run_agent(user_input: str, messages: list, session_id: str = "",
     t_start  = time.time()
     turns_used = 0
 
+    last_error = ""
     for turn in range(1, mt + 1):
         turns_used = turn
         # Compress before each turn so long tool-heavy loops (e.g. processing
@@ -1127,9 +1129,15 @@ def run_agent(user_input: str, messages: list, session_id: str = "",
             print(f"  {C.DIM}{_rgb(150,150,150)}Likely the context grew past the model's "
                   f"window. Try /new to reset, lower compress_at_percent, or set "
                   f"disabled_tool_groups in config.yaml.{C.RESET}")
+            last_error = "请求被服务端拒绝(多半是上下文超限)。可试试 /new 重置。"
+            break
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            print(f"\n  {_rgb(200,80,80)}✗  cannot reach the LLM server.{C.RESET}")
+            last_error = "连不上本地模型服务,请确认 mlx 服务在运行。"
             break
         except Exception as e:
             print(f"\n  {_rgb(200,80,80)}✗  turn failed: {e}{C.RESET}")
+            last_error = f"运行出错: {e}"
             break
     else:
         bar = f"{_rgb(200,80,80)}{'─' * _TURN_WIDTH}{C.RESET}"
@@ -1147,7 +1155,10 @@ def run_agent(user_input: str, messages: list, session_id: str = "",
     if session_id:
         _session.save(session_id, messages)
 
-    return _extract_final_answer(messages)
+    answer = _extract_final_answer(messages)
+    if not answer and last_error:
+        answer = f"⚠️ {last_error}"
+    return answer
 
 
 # ── Headless run + output sinks (shared core for Scheduler / future Gateway) ───

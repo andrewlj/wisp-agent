@@ -143,13 +143,27 @@ def run() -> None:
             if low == "/jobs":
                 agent._telegram_send("⏰ 定时任务\n" + schedule.format_jobs()); continue
 
-            agent._telegram_send("⏳ 处理中…")
+            # Keep a "typing…" indicator alive while the (possibly multi-minute)
+            # task runs, so the chat doesn't look frozen.
+            stop = threading.Event()
+
+            def _typing():
+                while not stop.is_set():
+                    try:
+                        api("sendChatAction", chat_id=user_id, action="typing")
+                    except Exception:
+                        pass
+                    stop.wait(4)
+
+            threading.Thread(target=_typing, daemon=True).start()
             try:
                 with _RUN_LOCK:                      # serialize with scheduled runs
                     answer = agent.run_session(text, session, log_name="telegram")
                 agent._telegram_send(answer or "(无输出)")
             except Exception as e:
                 agent._telegram_send(f"出错了：{e}")
+            finally:
+                stop.set()
 
 
 # ── launchd daemon (KeepAlive) ───────────────────────────────────────────────

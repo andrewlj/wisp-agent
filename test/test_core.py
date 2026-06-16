@@ -155,5 +155,31 @@ check("core always included", "bash" in _names and "done" in _names)
 check("requested group included", "mail_list" in _names)
 check("other groups excluded", "calendar_list" not in _names and "daily_briefing" not in _names)
 
+# ── resilience: friendly error on server-down ───────────────────────────────
+print("\nresilience + send_to_phone")
+import io
+import contextlib
+import requests as _rq
+
+
+def _boom(_messages):
+    raise _rq.exceptions.ConnectionError("server down")
+
+
+_orig = agent.call_api_stream
+agent.call_api_stream = _boom
+with contextlib.redirect_stdout(io.StringIO()):
+    _ans = agent.run_agent("hi", [{"role": "system", "content": ""}], reflect=False, max_turns=2)
+agent.call_api_stream = _orig
+check("run_agent → friendly msg when server unreachable",
+      _ans.startswith("⚠️") and "连不上" in _ans)
+
+tools.init_telegram("", "")
+check("send_to_phone: not configured → error",
+      tools.tool_send_to_phone("/tmp/x").startswith("error: Telegram not configured"))
+tools.init_telegram("tok", "123")
+check("send_to_phone: missing file → error",
+      tools.tool_send_to_phone("/no/such/file").startswith("error: file not found"))
+
 print(f"\n{'─' * 40}\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

@@ -123,7 +123,7 @@ wisp schedule on <name> | off <name> | remove <name>
 | `/help` | Show all commands |
 | `/exit` | Quit wisp |
 
-## Tools (62 total)
+## Tools (63 total)
 
 | Category | Tools |
 |----------|-------|
@@ -141,6 +141,7 @@ wisp schedule on <name> | off <name> | remove <name>
 | Scheduler | `schedule_list`, `schedule_add`, `schedule_remove` |
 | News | `daily_briefing` |
 | Memory | `remember`, `forget` |
+| Phone | `send_to_phone` |
 | Learn | `learn` |
 
 ## Data directory

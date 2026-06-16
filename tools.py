@@ -132,6 +132,17 @@ def init_serpapi(api_key: str) -> None:
     global _SERPAPI_KEY
     _SERPAPI_KEY = (api_key or "").strip()
 
+
+# ── Telegram (set once from config.yaml; used by send_to_phone) ───────────────
+
+_TELEGRAM_BOT_TOKEN: str = ""
+_TELEGRAM_USER_ID: str = ""
+
+def init_telegram(bot_token: str, user_id) -> None:
+    global _TELEGRAM_BOT_TOKEN, _TELEGRAM_USER_ID
+    _TELEGRAM_BOT_TOKEN = (bot_token or "").strip()
+    _TELEGRAM_USER_ID = str(user_id or "").strip()
+
 def _get_page():
     global _pw, _browser, _page
     if _page is None:
@@ -682,6 +693,17 @@ SCHEMAS: list[dict] = [
         "Remove previously remembered facts that contain the keyword.",
         {"keyword": {"type": "string", "description": "Keyword; all remembered items containing it are removed."}},
         ["keyword"]),
+
+    # ── Send to phone ────────────────────────────────────────────────────────
+    _fn("send_to_phone",
+        "Send a local file to the user's phone via Telegram (e.g. a generated "
+        "report, screenshot, or briefing). Use when the user says '发到我手机' / "
+        "'send me the file'. Images preview inline; other files are sent as a "
+        "document.",
+        {
+            "path":    {"type": "string", "description": "Absolute or ~ path to the local file."},
+            "caption": {"type": "string", "description": "Optional caption to send with the file."},
+        }, ["path"]),
 ]
 
 
@@ -3229,6 +3251,35 @@ def tool_remember(fact: str) -> str:
 def tool_forget(keyword: str) -> str:
     import memory as _memory
     return _memory.forget(keyword)
+
+
+# ── Send a local file to the user's phone (Telegram) ──────────────────────────
+
+def tool_send_to_phone(path: str, caption: str = "") -> str:
+    """Upload a local file to the user's Telegram chat (their phone)."""
+    if not _TELEGRAM_BOT_TOKEN or not _TELEGRAM_USER_ID:
+        return "error: Telegram not configured (set telegram.bot_token/user_id in config.yaml)"
+    p = Path(path).expanduser()
+    if not p.exists() or not p.is_file():
+        return f"error: file not found: {path}"
+    if p.stat().st_size > 50 * 1024 * 1024:
+        return "error: file exceeds Telegram's 50MB limit"
+
+    img = p.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp")
+    method = "sendPhoto" if img else "sendDocument"
+    field  = "photo" if img else "document"
+    url = f"https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/{method}"
+    data = {"chat_id": _TELEGRAM_USER_ID}
+    if caption:
+        data["caption"] = caption[:1024]
+    try:
+        with open(p, "rb") as fh:
+            r = _requests.post(url, data=data, files={field: (p.name, fh)}, timeout=120)
+        if r.status_code == 200 and r.json().get("ok"):
+            return f"ok: sent '{p.name}' to your phone"
+        return f"error: Telegram {r.status_code} — {r.text[:200]}"
+    except Exception as e:
+        return f"error: {e}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

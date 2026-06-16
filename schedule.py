@@ -13,6 +13,7 @@ small persisted state file prevents double-firing across restarts.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -114,6 +115,48 @@ def _most_recent_due(now: datetime, cal: dict):
     return None
 
 
+def _parse_interval(spec: str):
+    """'every 60m [08:00-22:00]' / 'every 2h' → interval dict, else None.
+    Optional window restricts firing to a daily time range."""
+    m = re.match(r"^every\s+(\d+)\s*([mh])"
+                 r"(?:\s+(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2}))?$",
+                 (spec or "").strip(), re.IGNORECASE)
+    if not m:
+        return None
+    minutes = int(m.group(1)) * (60 if m.group(2).lower() == "h" else 1)
+    if minutes < 1:
+        return None
+    iv = {"kind": "interval", "minutes": minutes}
+    if m.group(3) is not None:
+        iv["start"] = int(m.group(3)) * 60 + int(m.group(4))
+        iv["end"]   = int(m.group(5)) * 60 + int(m.group(6))
+    return iv
+
+
+def _schedule_kind(spec: str):
+    """Classify a schedule string → an interval dict, a {'kind':'calendar',...}
+    dict, or None if unparseable."""
+    iv = _parse_interval(spec)
+    if iv:
+        return iv
+    cal = _to_calendar(spec)
+    if cal:
+        return {"kind": "calendar", "cal": cal}
+    return None
+
+
+def _interval_due(now: datetime, iv: dict, last_dt) -> bool:
+    """Interval job is due when inside its window and >= `minutes` since the
+    last run (fires on the first in-window tick if never run)."""
+    if "start" in iv:
+        mins = now.hour * 60 + now.minute
+        if not (iv["start"] <= mins <= iv["end"]):
+            return False
+    if last_dt is None:
+        return True
+    return (now - last_dt).total_seconds() >= iv["minutes"] * 60
+
+
 # ── Tick state (prevents double-fire; enables sleep catch-up) ─────────────────
 
 def _load_state() -> dict:
@@ -148,21 +191,30 @@ def due_jobs(now: datetime | None = None) -> list[dict]:
     for j in list_jobs():
         if not j.get("enabled"):
             continue
-        cal = _to_calendar(j.get("schedule", ""))
-        if not cal:
+        kind = _schedule_kind(j.get("schedule", ""))
+        if not kind:
             continue
         name = j["name"]
         last = state.get(name)
-        if last is None:
-            state[name] = now.isoformat()        # seed, no retro-fire
-            changed = True
-            continue
-        try:
-            last_dt = datetime.fromisoformat(last)
-        except Exception:
-            last_dt = None
-        due = _most_recent_due(now, cal)
-        if due and (last_dt is None or last_dt < due):
+        last_dt = None
+        if last is not None:
+            try:
+                last_dt = datetime.fromisoformat(last)
+            except Exception:
+                last_dt = None
+
+        fire = False
+        if kind["kind"] == "interval":
+            fire = _interval_due(now, kind, last_dt)
+        else:  # calendar — seed on first sight so a passed slot isn't re-fired
+            if last_dt is None:
+                state[name] = now.isoformat()
+                changed = True
+                continue
+            due = _most_recent_due(now, kind["cal"])
+            fire = bool(due and last_dt < due)
+
+        if fire:
             out.append(j)
             state[name] = now.isoformat()
             changed = True
@@ -190,9 +242,9 @@ def add_job(name: str, prompt: str, schedule: str,
         return "error: name, schedule and (prompt or builtin) are required"
     if sink not in _VALID_SINKS:
         return f"error: sink must be one of {', '.join(sorted(_VALID_SINKS))}"
-    if _to_calendar(schedule) is None:
-        return (f"error: bad schedule '{schedule}' — use 'HH:MM' (daily) or cron "
-                f"'M H * * *' (minute must be a number)")
+    if _schedule_kind(schedule) is None:
+        return (f"error: bad schedule '{schedule}' — use 'HH:MM' (daily), cron "
+                f"'M H * * *', or 'every 60m 08:00-22:00' (interval + window)")
     data = _load()
     jobs = data.setdefault("jobs", [])
     jobs[:] = [j for j in jobs if j.get("name") != name]  # replace if exists

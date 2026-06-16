@@ -1252,7 +1252,95 @@ def _builtin_personal_briefing() -> str:
     return "\n\n".join(out)
 
 
-_BUILTINS = {"personal_briefing": _builtin_personal_briefing}
+_MAIL_SEEN = _WISP_HOME / ".mail_seen.json"
+
+
+def _load_seen() -> set:
+    try:
+        return set(json.loads(_MAIL_SEEN.read_text()))
+    except Exception:
+        return set()
+
+
+def _save_seen(ids: set) -> None:
+    try:
+        _MAIL_SEEN.parent.mkdir(parents=True, exist_ok=True)
+        _MAIL_SEEN.write_text(json.dumps(sorted(ids)))
+    except Exception:
+        pass
+
+
+def _classify_important(items: list) -> list:
+    """Single constrained LLM call: pick the important emails from a structured
+    list. Returns the subset with a one-line reason. Empty on any failure."""
+    listing = "\n".join(f"{i}. 发件人:{it['sender']} | 主题:{it['subject']}"
+                        for i, it in enumerate(items))
+    facts = _memory.load()
+    prompt = (
+        "你是邮件重要性筛选器。下面是刚到的未读邮件。挑出【重要】的："
+        "来自真人、需要我处理、有时效、点名我、工作/财务/安全相关。"
+        "忽略：广告、推广、社交平台通知、自动回执、newsletter。\n"
+        + (f"\n用户对重要性的偏好：\n{facts}\n" if facts else "")
+        + f"\n邮件：\n{listing}\n\n"
+        '只返回 JSON：{"important":[{"index":数字,"reason":"一句话为什么重要"}]}。'
+        "没有重要的就返回 {\"important\":[]}。"
+    )
+    try:
+        resp = _llm_post({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 300, "stream": False,
+            "response_format": {"type": "json_object"},
+        })
+        data = json.loads(resp.json()["choices"][0]["message"]["content"])
+        out = []
+        for e in data.get("important", []):
+            i = e.get("index")
+            if isinstance(i, int) and 0 <= i < len(items):
+                it = dict(items[i])
+                it["reason"] = (e.get("reason") or "").strip()
+                out.append(it)
+        return out
+    except Exception:
+        return []
+
+
+def _builtin_important_mail() -> str:
+    """Proactive watcher: find NEW unread mail since last check, LLM-triage for
+    importance, return a push for the important ones (empty = stay silent).
+    Deterministic gather + one constrained classification call."""
+    import re as _re
+    import tools
+    raw = tools.tool_mail_list(unread_only=True, limit=40)
+    if raw.startswith("error") or "no messages" in raw.lower():
+        return ""
+    items = []
+    for line in raw.splitlines():
+        m = _re.search(r"^[●\s]*(.+?) \| (.+?) \| .*? \| id:(\S+)\s*$", line)
+        if m:
+            items.append({"sender": m.group(1).strip(),
+                          "subject": m.group(2).strip(), "id": m.group(3)})
+    if not items:
+        return ""
+    seen = _load_seen()
+    new = [it for it in items if it["id"] not in seen]
+    _save_seen({it["id"] for it in items})   # only keep current unread → bounded
+    if not new:
+        return ""
+    important = _classify_important(new)
+    if not important:
+        return ""
+    lines = ["📬 重要邮件提醒"]
+    for it in important:
+        lines.append(f"• {it['sender']} | {it['subject']}"
+                     + (f"\n  {it['reason']}" if it.get("reason") else ""))
+    return "\n".join(lines)
+
+
+_BUILTINS = {
+    "personal_briefing": _builtin_personal_briefing,
+    "important_mail": _builtin_important_mail,
+}
 
 
 def run_once(prompt: str, sink: str = "stdout", name: str = "wisp",
@@ -1288,6 +1376,10 @@ def run_once(prompt: str, sink: str = "stdout", name: str = "wisp",
     if builtin:
         fn = _BUILTINS.get(builtin)
         answer = fn() if fn else f"error: unknown builtin '{builtin}'"
+        # A builtin may return "" to mean "nothing worth delivering" (e.g. the
+        # mail watcher when nothing is important) — stay silent in that case.
+        if not (answer or "").strip():
+            return ""
         if sink == "stdout":
             print(answer)
         elif sink == "notify":

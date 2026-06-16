@@ -79,6 +79,29 @@ _jobs[0]["enabled"] = False
 _state.clear()
 check("disabled never fires", [j["name"] for j in schedule.due_jobs(T)] == [])
 
+# ── schedule: interval jobs ──────────────────────────────────────────────────
+print("\nschedule: interval scheduling")
+check("parse 'every 60m 08:00-22:00'",
+      schedule._parse_interval("every 60m 08:00-22:00")
+      == {"kind": "interval", "minutes": 60, "start": 480, "end": 1320})
+check("parse 'every 2h'", schedule._parse_interval("every 2h") == {"kind": "interval", "minutes": 120})
+check("reject 'every blah'", schedule._parse_interval("every blah") is None)
+_iv = schedule._parse_interval("every 60m 08:00-22:00")
+_noon = datetime(2026, 6, 16, 12, 0)
+check("interval first-fire in window", schedule._interval_due(_noon, _iv, None))
+check("interval too-soon → no", not schedule._interval_due(_noon, _iv, _noon - timedelta(minutes=30)))
+check("interval elapsed → fire", schedule._interval_due(_noon, _iv, _noon - timedelta(minutes=61)))
+check("interval outside window → no", not schedule._interval_due(datetime(2026, 6, 16, 23, 0), _iv, None))
+# via due_jobs (reuses the monkeypatched storage above)
+_state.clear()
+_jobs[:] = [{"name": "iv", "schedule": "every 60m", "enabled": True, "sink": "stdout", "builtin": "x"}]
+check("interval due_jobs: first tick fires",
+      [j["name"] for j in schedule.due_jobs(datetime(2026, 6, 16, 12, 0))] == ["iv"])
+check("interval due_jobs: too soon → no",
+      [j["name"] for j in schedule.due_jobs(datetime(2026, 6, 16, 12, 30))] == [])
+check("interval due_jobs: after interval → fires",
+      [j["name"] for j in schedule.due_jobs(datetime(2026, 6, 16, 13, 1))] == ["iv"])
+
 # ── compression: _sanitize_tool_pairing ──────────────────────────────────────
 print("\nagent._sanitize_tool_pairing")
 msgs = [
@@ -180,6 +203,23 @@ check("send_to_phone: not configured → error",
 tools.init_telegram("tok", "123")
 check("send_to_phone: missing file → error",
       tools.tool_send_to_phone("/no/such/file").startswith("error: file not found"))
+
+# ── important-mail watcher (stubbed mail + classifier) ───────────────────────
+print("\nimportant_mail watcher")
+import pathlib
+import tempfile
+_t = tools
+_t.tool_mail_list = lambda **k: ("[acct] 1 unread message(s)\n"
+                                 "● Uber <uber@uber.com> | promo | 2026 | id:abc123@x")
+agent._MAIL_SEEN = pathlib.Path(tempfile.mkdtemp()) / ".mail_seen.json"
+agent._classify_important = lambda items: []
+check("watcher silent when nothing important", agent._builtin_important_mail() == "")
+agent._MAIL_SEEN.unlink(missing_ok=True)                 # reset so item is 'new' again
+agent._classify_important = lambda items: [dict(items[0], reason="需回复")]
+_out = agent._builtin_important_mail()
+check("watcher pushes when important", "重要邮件" in _out and "Uber" in _out)
+check("watcher silent on second run (id already seen)",
+      agent._builtin_important_mail() == "")
 
 print(f"\n{'─' * 40}\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

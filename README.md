@@ -15,7 +15,8 @@ A lightweight local macOS intelligent assistant powered by any OpenAI-compatible
 - **Task checkpoint system** — multi-step task tracking with recovery support
 - **Context compression** — auto-summarises old messages at a % of the model's context window (auto-detected from the server); errors preserved verbatim
 - **Telegram gateway** — chat with wisp from your phone; a single daemon also runs scheduled tasks
-- **Scheduler** — recurring tasks (e.g. a morning briefing) delivered to notification / file / Telegram
+- **Scheduler** — recurring tasks (fixed times or intervals, e.g. `every 60m 08:00-22:00`) delivered to notification / file / Telegram
+- **Proactive mail watcher** — hourly check that LLM-triages new unread mail and pings Telegram only when something is genuinely important
 - **Daily briefing** — config-driven HTML news report from global sources (`briefing.yaml`)
 - **Workspace sandbox** — all file outputs confined to `~/wisp/workspace`; writes outside are blocked
 - **LLM retry** — exponential-backoff retry on connection errors and 5xx; stalled streams time out cleanly
@@ -104,6 +105,7 @@ wisp gateway status | restart | stop | start | uninstall
 # Scheduled tasks (run by the gateway)
 wisp schedule list
 wisp schedule on <name> | off <name> | remove <name>
+# schedules: 'HH:MM' (daily), cron 'M H * * *', or 'every 60m 08:00-22:00' (interval+window)
 ```
 
 ## REPL commands

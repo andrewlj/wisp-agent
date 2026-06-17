@@ -496,9 +496,10 @@ SCHEMAS: list[dict] = [
         }, []),
 
     _fn("mail_read",
-        "Read the full content of an email from macOS Mail.app. "
-        "Returns sender, date, subject, and body text (truncated to 3000 chars). "
-        "Prefer message_id (from mail_list) to locate the message.",
+        "Read the FULL CONTENT/body of ONE specific email — use for '读一下…邮件' / "
+        "'看看那封…的内容' / 'open that email'. (To list accounts use mail_accounts; "
+        "to list messages use mail_list.) Locate it by message_id (from mail_list) "
+        "or by subject/sender; if only the subject is known, mail_list first.",
         {
             "message_id": {"type": "string", "description": "Exact message id from mail_list output (preferred — reliable). Use this instead of subject when available."},
             "subject": {"type": "string", "description": "Fallback: email subject (partial match). Brittle — use message_id when possible."},
@@ -548,10 +549,10 @@ SCHEMAS: list[dict] = [
         }, ["to", "subject", "body"]),
 
     _fn("mail_draft",
-        "Compose an email and save it to Drafts WITHOUT sending. Use when the "
-        "user wants to review/edit before sending, or to draft a reply for them "
-        "to approve. Safer than mail_send — nothing goes out until they send it "
-        "from Mail. Same arguments as mail_send.",
+        "Draft an email and save it to Drafts WITHOUT sending — ALWAYS call this "
+        "for '帮我起草一封…' / '写封邮件给…(先存草稿)' / 'draft an email to …'. Do NOT "
+        "just write the email text in your reply; compose it with this tool so it "
+        "lands in Drafts for the user to review and send. Safer than mail_send.",
         {
             "to":      {"type": "string", "description": "Recipient address(es), comma-separated."},
             "subject": {"type": "string", "description": "Email subject."},

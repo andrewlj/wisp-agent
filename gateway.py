@@ -235,15 +235,31 @@ def stop() -> str:
 
 
 def restart() -> str:
-    r = subprocess.run(
-        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{_LABEL}"],
-        capture_output=True, text=True)
-    if r.returncode == 0:
-        return "ok: restarted"
-    p = _plist_path()                      # fallback: reload
+    """Reload the gateway with the current code. Uses unload+load (deterministic)
+    rather than `launchctl kickstart -k`, which was observed to report success
+    without actually replacing the process — leaving stale code running."""
+    p = _plist_path()
+    if not p.exists():
+        return "not installed — run: wisp gateway install"
+    old = _pid()
     subprocess.run(["launchctl", "unload", str(p)], capture_output=True)
-    subprocess.run(["launchctl", "load", str(p)], capture_output=True)
-    return "ok: restarted (reloaded)"
+    r = subprocess.run(["launchctl", "load", str(p)], capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"error: launchctl load failed: {r.stderr.strip()}"
+    time.sleep(1.5)
+    new = _pid()
+    if new and new != old:
+        return f"ok: restarted (pid {old or '—'} → {new})"
+    return "ok: reloaded"
+
+
+def _pid() -> str | None:
+    r = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if _LABEL in line:
+            pid = line.split()[0]
+            return pid if pid != "-" else None
+    return None
 
 
 def cli(argv: list[str]) -> None:

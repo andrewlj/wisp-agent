@@ -1239,13 +1239,8 @@ def _builtin_personal_briefing() -> str:
     else:
         out.append("📬 未读邮件：\n" + unread.strip())
 
-    cal = tools.tool_calendar_list(days=2)
-    cl = cal.lower()
-    if not cal.strip() or "error" in cl or "timed out" in cl or "执行错误" in cal or "遇到一个错误" in cal:
-        out.append("📅 今明日程：后台读取失败（日历在后台进程不稳定，可在电脑上 wisp 里查）")
-    else:
-        out.append("📅 今明日程：\n" + cal.strip())
-
+    # 日历在 launchd 后台进程里读不出来（macOS 限制：EventKit 事件日历不同步、
+    # AppleScript 不可靠），故不放进自动简报。日程请在电脑上的 wisp 里查。
     rem = tools.tool_reminders_list(limit=15)
     if "no pending" in rem.lower() or not rem.strip():
         out.append("✅ 待办：暂无未完成项")

@@ -1242,7 +1242,7 @@ def _builtin_personal_briefing() -> str:
     cal = tools.tool_calendar_list(days=2)
     cl = cal.lower()
     if not cal.strip() or "error" in cl or "timed out" in cl or "执行错误" in cal or "遇到一个错误" in cal:
-        out.append("📅 今明日程：暂时读取失败（稍后问我“今天日程”即可）")
+        out.append("📅 今明日程：后台读取失败（日历在后台进程不稳定，可在电脑上 wisp 里查）")
     else:
         out.append("📅 今明日程：\n" + cal.strip())
 

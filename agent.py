@@ -1240,7 +1240,11 @@ def _builtin_personal_briefing() -> str:
         out.append("📬 未读邮件：\n" + unread.strip())
 
     cal = tools.tool_calendar_list(days=2)
-    out.append("📅 今明日程：\n" + (cal.strip() or "无"))
+    cl = cal.lower()
+    if not cal.strip() or "error" in cl or "timed out" in cl or "执行错误" in cal or "遇到一个错误" in cal:
+        out.append("📅 今明日程：暂时读取失败（稍后问我“今天日程”即可）")
+    else:
+        out.append("📅 今明日程：\n" + cal.strip())
 
     rem = tools.tool_reminders_list(limit=15)
     if "no pending" in rem.lower() or not rem.strip():

@@ -2041,7 +2041,7 @@ function run() {{
     // cold store (only the local calendar synced yet) — refresh + wait briefly
     // and re-fetch, rather than falling to the slow 60s AppleScript path.
     try {{ store.refreshSourcesIfNecessary(); }} catch (e) {{}}
-    var _dl = $.NSDate.dateWithTimeIntervalSinceNow(3);
+    var _dl = $.NSDate.dateWithTimeIntervalSinceNow(10);
     while (cals.count <= 1 && $.NSDate.date.compare(_dl) < 0) {{
       $.NSRunLoop.currentRunLoop.runModeBeforeDate($.NSDefaultRunLoopMode, $.NSDate.dateWithTimeIntervalSinceNow(0.1));
       cals = store.calendarsForEntityType($.EKEntityTypeEvent);
@@ -2109,6 +2109,7 @@ def tool_calendar_list(days: int = 7, calendar_name: str = "") -> str:
 
     script = f"""
 tell application "Calendar"
+    launch
     {guard}
     {skip_setup}
     set startDate to current date
@@ -2151,7 +2152,7 @@ tell application "Calendar"
     return output
 end tell
 """
-    raw = _osascript_clean(script, timeout=60)
+    raw = _osascript_clean(script, timeout=40)
     if raw.startswith("error:") or raw.startswith("no upcoming"):
         return raw
     return _format_cal_raw(raw, days)
@@ -2222,7 +2223,7 @@ function run() {{
   var cals = store.calendarsForEntityType($.EKEntityTypeEvent);
   if (cals.count <= 1) {{
     try {{ store.refreshSourcesIfNecessary(); }} catch (e) {{}}
-    var _dl = $.NSDate.dateWithTimeIntervalSinceNow(3);
+    var _dl = $.NSDate.dateWithTimeIntervalSinceNow(10);
     while (cals.count <= 1 && $.NSDate.date.compare(_dl) < 0) {{
       $.NSRunLoop.currentRunLoop.runModeBeforeDate($.NSDefaultRunLoopMode, $.NSDate.dateWithTimeIntervalSinceNow(0.1));
       cals = store.calendarsForEntityType($.EKEntityTypeEvent);

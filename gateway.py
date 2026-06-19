@@ -273,3 +273,7 @@ def cli(argv: list[str]) -> None:
     else:
         print("usage: agent.py gateway "
               "[run | install | uninstall | status | start | stop | restart]")
+
+
+if __name__ == "__main__":
+    cli(sys.argv[1:])

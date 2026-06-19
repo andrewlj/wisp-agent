@@ -2037,7 +2037,17 @@ ObjC.import('EventKit'); ObjC.import('Foundation');
 function run() {{
   var store = $.EKEventStore.alloc.init;
   var cals = store.calendarsForEntityType($.EKEntityTypeEvent);
-  if (cals.count <= 1) return "EK_FALLBACK";
+  if (cals.count <= 1) {{
+    // cold store (only the local calendar synced yet) — refresh + wait briefly
+    // and re-fetch, rather than falling to the slow 60s AppleScript path.
+    try {{ store.refreshSourcesIfNecessary(); }} catch (e) {{}}
+    var _dl = $.NSDate.dateWithTimeIntervalSinceNow(3);
+    while (cals.count <= 1 && $.NSDate.date.compare(_dl) < 0) {{
+      $.NSRunLoop.currentRunLoop.runModeBeforeDate($.NSDefaultRunLoopMode, $.NSDate.dateWithTimeIntervalSinceNow(0.1));
+      cals = store.calendarsForEntityType($.EKEntityTypeEvent);
+    }}
+    if (cals.count <= 1) return "EK_FALLBACK";
+  }}
   var want = {cal_js};
   var useCals = cals;
   if (want) {{
@@ -2210,7 +2220,15 @@ ObjC.import('EventKit'); ObjC.import('Foundation');
 function run() {{
   var store = $.EKEventStore.alloc.init;
   var cals = store.calendarsForEntityType($.EKEntityTypeEvent);
-  if (cals.count <= 1) return "EK_FALLBACK";
+  if (cals.count <= 1) {{
+    try {{ store.refreshSourcesIfNecessary(); }} catch (e) {{}}
+    var _dl = $.NSDate.dateWithTimeIntervalSinceNow(3);
+    while (cals.count <= 1 && $.NSDate.date.compare(_dl) < 0) {{
+      $.NSRunLoop.currentRunLoop.runModeBeforeDate($.NSDefaultRunLoopMode, $.NSDate.dateWithTimeIntervalSinceNow(0.1));
+      cals = store.calendarsForEntityType($.EKEntityTypeEvent);
+    }}
+    if (cals.count <= 1) return "EK_FALLBACK";
+  }}
   var want = {json.dumps(calendar_name)};
   var useCals = cals;
   if (want) {{

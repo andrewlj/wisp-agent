@@ -2869,10 +2869,13 @@ end tell
 
 def tool_mail_delete(subject: str = "", sender: str = "", account: str = "",
                      mailbox: str = "INBOX", message_id: str = "") -> str:
-    """Move an email to the Junk folder (垃圾邮件) — wisp's single bin for
-    deleting mail and clearing ads/spam. Recoverable until you empty Junk in
-    Mail (Junk can be emptied manually; the Trash/废纸篓 often can't, which is
-    why everything goes here). Locate by `message_id` (preferred) or subject.
+    """Move ONE inbox email to the Junk folder (垃圾邮件) — for deleting a
+    single message or clearing an ad/spam out of the inbox. Locate by
+    `message_id` (preferred) or subject.
+
+    To clear/delete mail that is ALREADY in the Junk folder (e.g. after listing
+    junk mail), do NOT call this per message — use
+    `mail_move_all(source_mailbox='junk', target_mailbox='trash')` once.
     """
     return tool_mail_move(
         subject=subject, sender=sender, account=account,
@@ -2981,6 +2984,11 @@ tell application "Mail"
                 if tgtMbox is missing value then
                     return "error: target mailbox \\"{tgt_escaped}\\" not found in any account"
                 end if
+                try
+                    if (name of theMbox is name of tgtMbox) and (name of (account of theMbox) is name of (account of tgtMbox)) then
+                        return "noop: already in " & (name of tgtMbox)
+                    end if
+                end try
                 move item 1 of msgs to tgtMbox
                 return "ok"
             end if
@@ -2992,6 +3000,10 @@ end tell
     result = _osascript_clean(script, timeout=30)
     if result == "ok":
         return f"ok: moved '{message_id or subject}' to {label}"
+    if result.startswith("noop:"):
+        # Already in the target folder — report honestly instead of faking success.
+        return (f"已在 {label}，无需移动。若要清空该文件夹里的邮件，"
+                f"请用 mail_move_all(source_mailbox='{target_mailbox}', target_mailbox='trash')")
     return result
 
 

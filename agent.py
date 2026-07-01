@@ -149,6 +149,11 @@ def _build_system_prompt(profile: dict) -> str:
         "- If a tool returns `error: ...`, read it and fix your next call — never repeat the same failing call or bypass it.",
         "- Use `read_file`/`write_file` for file content; `bash` for everything else.",
     ]
+    if "mail" not in disabled:
+        act_lines.append(
+            "- 清空/删除「垃圾箱(Junk)里」的邮件时，用 `mail_move_all(source_mailbox='junk', "
+            "target_mailbox='trash')` 一次性完成（这是可恢复的移动），绝不要逐封调用 `mail_delete`。"
+            "只有把收件箱里的广告/垃圾邮件扔进垃圾箱时才用 `mail_delete`。")
     if "system" not in disabled:
         act_lines.append("- Use `osascript` for notifications, app control, and dialogs.")
     if "browser" not in disabled:

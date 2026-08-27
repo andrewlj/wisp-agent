@@ -42,19 +42,34 @@ def _scheduler_loop() -> None:
     gateway process so there is a single daemon managing chat + schedules.
     Catches up a slot missed while the Mac slept (see schedule.due_jobs)."""
     import agent, schedule
+    last_err: str | None = None   # dedupe: alert once on failure, once on recovery
     while True:
         try:
-            for job in schedule.due_jobs():
-                with _RUN_LOCK:
-                    try:
-                        agent.run_once(
-                            job.get("prompt", ""), job.get("sink", "notify"),
-                            name=job["name"], tool_groups=job.get("tool_groups"),
-                            builtin=job.get("builtin"))
-                    except Exception as e:
-                        agent._telegram_send(f"⚠️ 定时任务 {job['name']} 失败：{e}")
-        except Exception:
-            pass
+            jobs = schedule.due_jobs()
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            print(f"⚠️ scheduler: due_jobs() failed — scheduling is stalled: {err}",
+                  flush=True)
+            if err != last_err:
+                agent._telegram_send(f"⚠️ 定时任务系统异常，调度已暂停：{err}\n"
+                                      f"（可能是 ~/wisp/.schedule_state.json 损坏）")
+                last_err = err
+            time.sleep(30)
+            continue
+
+        if last_err is not None:
+            agent._telegram_send("✅ 定时任务系统已恢复正常")
+            last_err = None
+
+        for job in jobs:
+            with _RUN_LOCK:
+                try:
+                    agent.run_once(
+                        job.get("prompt", ""), job.get("sink", "notify"),
+                        name=job["name"], tool_groups=job.get("tool_groups"),
+                        builtin=job.get("builtin"))
+                except Exception as e:
+                    agent._telegram_send(f"⚠️ 定时任务 {job['name']} 失败：{e}")
         time.sleep(30)
 
 

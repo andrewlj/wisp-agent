@@ -430,6 +430,9 @@ def print_banner() -> None:
 
 _MAX_RETRIES  = 3
 _RETRY_DELAYS = (1, 2, 4)   # seconds between attempts
+STREAM_TIMEOUT = 90   # hard wall-clock cap on a single streamed response (s) —
+                      # see the comment in call_api_stream for why this exists
+                      # on top of _llm_post's per-chunk read timeout.
 
 
 def _llm_post(payload: dict, stream: bool = False) -> requests.Response:
@@ -442,7 +445,7 @@ def _llm_post(payload: dict, stream: bool = False) -> requests.Response:
       stream=True  → read_timeout=30s per chunk  (catches stalled streams)
       stream=False → read_timeout=120s            (non-streaming calls can be slow)
     """
-    timeout   = (10, 120)
+    timeout   = (10, 30) if stream else (10, 120)
     last_err: Exception = RuntimeError("LLM request failed")
 
     for attempt in range(_MAX_RETRIES + 1):
@@ -513,7 +516,17 @@ def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
     acc: dict[int, dict] = {}
     usage: dict = {}
 
+    # Wall-clock cap on the WHOLE streamed response, on top of _llm_post's
+    # per-chunk read timeout. A per-chunk timeout alone doesn't catch a server
+    # that dribbles out occasional bytes (e.g. keep-alive noise) while never
+    # finishing generation — that resets the per-chunk timer forever and hangs
+    # the REPL indefinitely with no error. This bounds the total time instead.
+    t_start = time.time()
     for raw in resp.iter_lines():
+        if time.time() - t_start > STREAM_TIMEOUT:
+            resp.close()
+            raise requests.exceptions.Timeout(
+                f"streaming response exceeded {STREAM_TIMEOUT}s total")
         if not raw or not raw.startswith(b"data: "):
             continue
         data = raw[6:]

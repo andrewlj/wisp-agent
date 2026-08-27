@@ -175,6 +175,54 @@ conv = [
 ]
 check("final answer from done result", agent._extract_final_answer(conv) == "FINAL")
 
+# ── run_agent: doesn't resurface a stale answer on an empty completion ───────
+# Repro of a real bug: a persistent (Telegram) session already has a real
+# answer in history; a later turn's completion is genuinely empty (no text,
+# no tool_calls — e.g. the model went degenerate after unusual content in
+# context). run_agent must not silently re-serve the old answer — that looked
+# to the user like the agent was stuck repeating itself forever.
+print("\nagent.run_agent — no stale-answer leak on empty completion")
+_session_hist = [
+    {"role": "system", "content": ""},
+    {"role": "user", "content": "删掉领英邮件"},
+    {"role": "assistant", "content": "已完成，删除了 5 封。"},
+]
+_orig_call_api_stream = agent.call_api_stream
+agent.call_api_stream = lambda messages: ("", [], {})   # model returns nothing
+_answer = agent.run_agent("继续", _session_hist, reflect=False, max_turns=2)
+agent.call_api_stream = _orig_call_api_stream            # restore the real function —
+                                                          # the tests below exercise it
+check("empty completion does not resurface an old answer", "已完成" not in _answer)
+
+# ── call_api_stream: server-abort-as-content detection + retry ───────────────
+print("\nagent._looks_like_server_abort / call_api_stream retry")
+_abort_text = ("Request aborted: process memory limit exceeded (usage 16.9 GB, "
+               "abort threshold (hard watermark) 15.0 GB).")
+check("detects a real server abort notice", agent._looks_like_server_abort(_abort_text))
+check("does not flag a normal reply", not agent._looks_like_server_abort("已完成，需要继续处理吗？"))
+
+_orig_call_once = agent._call_api_stream_once
+_saved_delays, agent._RETRY_DELAYS = agent._RETRY_DELAYS, (0, 0, 0)
+
+_calls = {"n": 0}
+def _flaky_once(messages):
+    _calls["n"] += 1
+    return (_abort_text, [], {}) if _calls["n"] < 2 else ("真实回复", [], {})
+agent._call_api_stream_once = _flaky_once
+_content, _, _ = agent.call_api_stream([{"role": "user", "content": "hi"}])
+check("retries past a transient server abort and returns the real answer",
+      _content == "真实回复")
+
+agent._call_api_stream_once = lambda messages: (_abort_text, [], {})
+try:
+    agent.call_api_stream([{"role": "user", "content": "hi"}])
+    check("gives up (raises) instead of returning abort text as a real answer", False)
+except RuntimeError:
+    check("gives up (raises) instead of returning abort text as a real answer", True)
+
+agent._call_api_stream_once = _orig_call_once
+agent._RETRY_DELAYS = _saved_delays
+
 # ── long-term memory (use a temp file, don't touch ~/wisp) ───────────────────
 print("\nmemory (long-term facts)")
 import memory as _mem

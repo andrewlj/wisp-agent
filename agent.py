@@ -497,12 +497,45 @@ def _detect_context_window() -> int:
     return 0
 
 
+_SERVER_ABORT_MARKERS = ("Request aborted:", "memory limit exceeded")
+
+
+def _looks_like_server_abort(text: str) -> bool:
+    """True if `text` is the server smuggling a mid-stream abort notice into
+    the completion content instead of a proper HTTP error. Seen from omlx
+    under GPU memory pressure: it aborts one in-flight request and self-heals
+    within ~1s, but the abort message arrives as ordinary `delta.content` — so
+    without this check it gets stored as if it were the model's real answer,
+    permanently poisoning the conversation history (the model tends to go
+    degenerate/empty on later turns after this odd text sits in its context)."""
+    return all(marker in text for marker in _SERVER_ABORT_MARKERS)
+
+
 def call_api_stream(messages: list) -> tuple[str, list[dict], dict]:
-    """Stream one LLM turn.  Returns (content, tool_calls, usage).
+    """Stream one LLM turn, retrying if the server smuggles a self-recovering
+    abort notice into the content instead of a real answer (see
+    `_looks_like_server_abort`). Returns (content, tool_calls, usage).
 
     usage = {"prompt_tokens": N, "completion_tokens": M} when the server
     reports it; empty dict when not available.
     """
+    last_content = ""
+    for attempt in range(_MAX_RETRIES + 1):
+        content, tool_calls, usage = _call_api_stream_once(messages)
+        if not _looks_like_server_abort(content):
+            return content, tool_calls, usage
+        last_content = content
+        if attempt < _MAX_RETRIES:
+            delay = _RETRY_DELAYS[attempt]
+            print(f"\n  {_rgb(210,170,50)}⟳  server aborted the request (memory "
+                  f"pressure) — retry {attempt + 1}/{_MAX_RETRIES} in {delay}s…{C.RESET}",
+                  flush=True)
+            time.sleep(delay)
+    raise RuntimeError(f"server repeatedly aborted the request: {last_content[:200]}")
+
+
+def _call_api_stream_once(messages: list) -> tuple[str, list[dict], dict]:
+    """One streaming LLM turn attempt. See `call_api_stream` for retry logic."""
     resp = _llm_post({
         "model":       MODEL,
         "messages":    messages,
@@ -1142,6 +1175,8 @@ def run_agent(user_input: str, messages: list, session_id: str = "",
               reflect: bool = True, max_turns: int | None = None) -> str:
     # Refresh system prompt so current date/time is always accurate
     messages[0] = {"role": "system", "content": _build_system_prompt(_profile)}
+    turn_start_idx = len(messages)   # boundary: never read a "final answer" from
+                                      # before this call's own user turn (see below)
     messages.append({"role": "user", "content": user_input})
 
     mt = max_turns or MAX_TURNS
@@ -1193,7 +1228,12 @@ def run_agent(user_input: str, messages: list, session_id: str = "",
     if session_id:
         _session.save(session_id, messages)
 
-    answer = _extract_final_answer(messages)
+    # Scoped to THIS call's own turns only — never the persisted history before
+    # it. Otherwise a turn that ends with a genuinely empty completion (no
+    # text, no tool call) silently resurfaces an old answer from many turns
+    # back instead of admitting nothing new was produced, which looks to the
+    # user like the agent is stuck repeating itself.
+    answer = _extract_final_answer(messages[turn_start_idx:])
     if not answer and last_error:
         answer = f"⚠️ {last_error}"
     return answer

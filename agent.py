@@ -46,6 +46,11 @@ WORKSPACE       = _cfg["agent"].get("workspace", "~/wisp-workspace")
 STRICT          = _cfg["agent"].get("strict_workspace", True)
 COMPRESS_AT_PCT = _cfg["agent"].get("compress_at_percent", 75)
 COMPRESS_AT_PCT = min(95, max(10, COMPRESS_AT_PCT))  # clamp to a sane range
+# Absolute ceiling on tokens-before-compression, independent of whatever window
+# the server reports — protects small local hardware even if detection returns
+# a larger number than the machine can comfortably hold in RAM. 0 = disabled
+# (percent-of-window only).
+CONTEXT_HARD_CAP = _cfg["agent"].get("context_hard_cap_tokens", 0)
 CTX_KEEP_RECENT = _cfg["agent"].get("context_keep_recent", 6)
 MAX_TOOL_RESULT = _cfg["agent"].get("max_tool_result_chars", 4000)
 HEADLESS_TIMEOUT   = _cfg["agent"].get("headless_timeout", 240)     # wall-clock cap for scheduled runs (s)
@@ -581,9 +586,14 @@ def _context_hint(messages: list) -> tuple[str, str]:
     coding so you can see how close you are to the limit without debug mode.
     """
     est = _estimate_tokens(messages) + _schema_tokens()
-    if CONTEXT_WINDOW > 0:
-        pct = est * 100 // CONTEXT_WINDOW
-        plain = f"  ctx ~{_fmt_tok(est)}/{_fmt_tok(CONTEXT_WINDOW)} {pct}%"
+    threshold = _compress_threshold()
+    if threshold > 0:
+        # Display against the same threshold that actually triggers compression
+        # (window% capped by CONTEXT_HARD_CAP) so the shown % hits COMPRESS_AT_PCT
+        # exactly when compression fires — no surprise cutoffs.
+        denom = threshold * 100 // COMPRESS_AT_PCT
+        pct = est * 100 // denom
+        plain = f"  ctx ~{_fmt_tok(est)}/{_fmt_tok(denom)} {pct}%"
         color = _rgb(90, 170, 90) if pct < 60 else (
                 _rgb(210, 160, 40) if pct < 85 else _rgb(210, 70, 70))
     else:
@@ -890,19 +900,29 @@ def _build_compress_transcript(middle: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _maybe_compress(messages: list) -> None:
-    """Compress context in-place when the request reaches COMPRESS_AT_PCT% of
-    the model's context window.
+def _compress_threshold() -> int:
+    """Token count that triggers compression: COMPRESS_AT_PCT% of the detected/
+    configured model.context_window, capped by CONTEXT_HARD_CAP (an absolute
+    ceiling independent of whatever window the server reports — protects small
+    local hardware even if detection returns a number the machine can't
+    comfortably hold in RAM). Returns 0 if neither bound is set (compression
+    off — same as before CONTEXT_HARD_CAP existed)."""
+    bounds = []
+    if CONTEXT_WINDOW > 0:
+        bounds.append(CONTEXT_WINDOW * COMPRESS_AT_PCT // 100)
+    if CONTEXT_HARD_CAP > 0:
+        bounds.append(CONTEXT_HARD_CAP)
+    return min(bounds) if bounds else 0
 
-    The threshold is derived from model.context_window so there's a single knob
-    to reason about: the displayed `ctx …%` and the compression trigger use the
-    same number (conversation + tool schemas). Disabled when context_window is
-    unknown (0). Keeps messages[0] (system prompt) + the last CTX_KEEP_RECENT
-    messages verbatim and summarises the middle.
+
+def _maybe_compress(messages: list) -> None:
+    """Compress context in-place when the request reaches the compression
+    threshold (see `_compress_threshold`). Keeps messages[0] (system prompt) +
+    the last CTX_KEEP_RECENT messages verbatim and summarises the middle.
     """
-    if CONTEXT_WINDOW <= 0:
-        return  # no window configured → can't compute a %, compression off
-    threshold = CONTEXT_WINDOW * COMPRESS_AT_PCT // 100
+    threshold = _compress_threshold()
+    if threshold <= 0:
+        return  # neither window nor hard cap configured → compression off
     est = _estimate_tokens(messages) + _schema_tokens()
     if est <= threshold:
         return
@@ -1516,12 +1536,18 @@ def interactive() -> None:
             src = "from server"
         else:
             src = "from config"
+        cap_note = f"  ·  hard cap {CONTEXT_HARD_CAP}" if CONTEXT_HARD_CAP > 0 else ""
         print(c(C.GRAY, f"  context window: {CONTEXT_WINDOW} tokens ({src})  ·  "
-                        f"compress at {COMPRESS_AT_PCT}%\n"))
+                        f"compress at {COMPRESS_AT_PCT}%{cap_note} "
+                        f"(threshold ~{_compress_threshold()} tok)\n"))
     else:
         CONTEXT_WINDOW = 0
-        print(c(C.GRAY, "  context window: unknown (server didn't report it) — "
-                        "set model.context_window to enable compression\n"))
+        if CONTEXT_HARD_CAP > 0:
+            print(c(C.GRAY, f"  context window: unknown (server didn't report it) — "
+                            f"compression still on via hard cap ({CONTEXT_HARD_CAP} tok)\n"))
+        else:
+            print(c(C.GRAY, "  context window: unknown (server didn't report it) — "
+                            "set model.context_window or context_hard_cap_tokens to enable compression\n"))
 
     _sys_prompt = _build_system_prompt(_profile)
 

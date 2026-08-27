@@ -144,6 +144,25 @@ check("compressed list keeps valid tool pairing", _ok)
 check("summary is a user message (not mid-list system)",
       any(m["role"] == "user" and "compressed" in str(m.get("content", "")) for m in big))
 
+# ── compression: _compress_threshold / CONTEXT_HARD_CAP ──────────────────────
+print("\nagent._compress_threshold (hard cap)")
+agent.CONTEXT_WINDOW = 65000
+agent.COMPRESS_AT_PCT = 60
+agent.CONTEXT_HARD_CAP = 20000
+check("hard cap wins when tighter than window%",
+      agent._compress_threshold() == 20000)
+agent.CONTEXT_HARD_CAP = 100000
+check("window% wins when tighter than hard cap",
+      agent._compress_threshold() == 65000 * 60 // 100)
+agent.CONTEXT_WINDOW = 0
+agent.CONTEXT_HARD_CAP = 20000
+check("hard cap alone still triggers when window is undetected",
+      agent._compress_threshold() == 20000)
+agent.CONTEXT_HARD_CAP = 0
+check("compression off when neither window nor hard cap is set",
+      agent._compress_threshold() == 0)
+agent.CONTEXT_WINDOW = 1000  # restore for later tests in this file
+
 # ── _extract_final_answer ────────────────────────────────────────────────────
 print("\nagent._extract_final_answer")
 import json as _json

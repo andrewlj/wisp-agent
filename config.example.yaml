@@ -20,6 +20,13 @@ agent:
   compress_at_percent: 75           # compress context when usage reaches this % of
                                     # model.context_window (needs context_window set;
                                     # if context_window is 0, compression is off)
+  context_hard_cap_tokens: 0        # absolute ceiling that ALSO triggers compression,
+                                    # regardless of what the server reports for
+                                    # context_window — a safety net for small/local
+                                    # hardware where you don't trust the server's
+                                    # reported window to fit comfortably in RAM.
+                                    # Effective threshold = min(window%, this).
+                                    # 0 = disabled (percent-of-window only).
   context_keep_recent: 6            # number of recent messages to keep verbatim
   max_tool_result_chars: 4000       # cap each tool result fed to the model so a
                                     # large output can't blow past the context

@@ -238,6 +238,28 @@ check("forget removes matching", "1" in _mem.forget("张三"))
 check("forgotten fact is gone", "张三" not in _mem.load())
 check("kept fact remains", "都柏林" in _mem.load())
 
+# ── knowledge base: learned-rule keyword gate ─────────────────────────────────
+# Repro of a real bug: _TOOL_KEYWORDS was a hand-maintained list that never
+# grew with the tool set — every mail/calendar/reminders/notes tool was
+# missing, so ANY rule about those (wisp's most-used tools) was permanently
+# unsaveable, and the model had no way to recover from the rejection: it kept
+# resubmitting the identical rule until the turn limit was hit ("死循环").
+# Fixed by deriving the keyword set from the live tool schemas instead.
+print("\nknowledge (learned rules — keyword gate must track the real tool set)")
+import knowledge as _know
+import tempfile as _tempfile
+_know._KNOWLEDGE_PATH = Path(_tempfile.mkdtemp()) / "knowledge.md"
+_know._KNOWLEDGE_PATH.write_text(_know._DEFAULT_CONTENT, encoding="utf-8")
+_know._TOOL_KEYWORDS = None   # force a fresh derive from the current tool set
+check("mail_delete is a recognized keyword (was missing before the fix)",
+      "mail_delete" in _know._tool_keywords())
+check("calendar_list is a recognized keyword (was missing before the fix)",
+      "calendar_list" in _know._tool_keywords())
+check("a rule naming a real mail tool is accepted",
+      _know.append_rule("清理广告邮件用 mail_delete，不要手动逐封点开").startswith("ok:"))
+check("a rule naming no tool at all is still rejected (by design)",
+      _know.append_rule("以后要更礼貌一点").startswith("error:"))
+
 # ── tool gating: schemas_for_groups ──────────────────────────────────────────
 print("\ntools.schemas_for_groups")
 _names = [s["function"]["name"] for s in tools.schemas_for_groups(["mail"])]

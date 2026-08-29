@@ -27,13 +27,32 @@ _DEFAULT_CONTENT = """\
 - 生成报告或文件后 → 用 open 工具打开，不要只打印路径
 """
 
-# Tool keywords used for quality check
-_TOOL_KEYWORDS = {
-    "browser", "bash", "read_file", "write_file", "http_get", "http_post",
-    "osascript", "find_files", "open", "screenshot", "clipboard",
-    "glob", "grep", "head", "curl", "find", "move_file", "copy_file",
-    "delete_file", "task_init", "learn",
+# Generic terms a rule might legitimately use without naming an exact tool
+# (e.g. "改用 bash 里的 curl", "用 grep 过滤"). Real tool names (mail_delete,
+# calendar_list, etc.) are added at runtime by _tool_keywords() below, so this
+# quality check can never again silently fall behind the actual tool set —
+# that staleness previously made EVERY mail/calendar/reminders/notes rule
+# unsaveable (no keyword in this set matched), and the model had no way to
+# recover from the rejection: it kept resubmitting the same rule verbatim
+# until the turn limit was hit.
+_GENERIC_KEYWORDS = {
+    "browser", "bash", "osascript", "screenshot", "clipboard",
+    "glob", "grep", "head", "curl", "find",
 }
+
+_TOOL_KEYWORDS: set[str] | None = None   # lazily built, cached — see _tool_keywords()
+
+
+def _tool_keywords() -> set[str]:
+    global _TOOL_KEYWORDS
+    if _TOOL_KEYWORDS is None:
+        try:
+            import tools as _tools
+            names = {s["function"]["name"].lower() for s in _tools.SCHEMAS}
+        except Exception:
+            names = set()   # tools.py not importable yet — fall back to generic-only
+        _TOOL_KEYWORDS = _GENERIC_KEYWORDS | names
+    return _TOOL_KEYWORDS
 
 
 def init_knowledge(workspace: str) -> None:
@@ -69,7 +88,7 @@ def append_rule(rule: str, category: str = "general") -> str:
 
     # Quality check: rule must mention at least one known tool/command
     rule_lower = rule.lower()
-    if not any(k in rule_lower for k in _TOOL_KEYWORDS):
+    if not any(k in rule_lower for k in _tool_keywords()):
         return "error: rule must mention a specific tool or command"
 
     # Dedup check

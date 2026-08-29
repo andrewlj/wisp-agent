@@ -8,6 +8,7 @@ Dependencies: requests, pyyaml, prompt_toolkit, playwright
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -545,56 +546,77 @@ def _call_api_stream_once(messages: list) -> tuple[str, list[dict], dict]:
         "stream":      True,
     }, stream=True)
 
-    full_content = ""
-    acc: dict[int, dict] = {}
-    usage: dict = {}
+    # Read the stream on a background thread and join() it with a wall-clock
+    # cap — the same "abandon a stuck worker thread" pattern run_once already
+    # uses for headless timeouts. This is deliberately NOT a check inside the
+    # `for raw in resp.iter_lines()` loop: a server that goes completely
+    # silent (zero bytes, ever — e.g. it crashed inside its own request
+    # handler after accepting the connection, as omlx does when it hits an
+    # internal error mid-generation) never yields a single line, so a check
+    # living inside the loop body would never run either — that gap is
+    # exactly how this hung again after the first, narrower fix.
+    result: dict = {}
 
-    # Wall-clock cap on the WHOLE streamed response, on top of _llm_post's
-    # per-chunk read timeout. A per-chunk timeout alone doesn't catch a server
-    # that dribbles out occasional bytes (e.g. keep-alive noise) while never
-    # finishing generation — that resets the per-chunk timer forever and hangs
-    # the REPL indefinitely with no error. This bounds the total time instead.
-    t_start = time.time()
-    for raw in resp.iter_lines():
-        if time.time() - t_start > STREAM_TIMEOUT:
-            resp.close()
-            raise requests.exceptions.Timeout(
-                f"streaming response exceeded {STREAM_TIMEOUT}s total")
-        if not raw or not raw.startswith(b"data: "):
-            continue
-        data = raw[6:]
-        if data == b"[DONE]":
-            break
-        chunk = json.loads(data)
+    def _read():
+        full_content = ""
+        acc: dict[int, dict] = {}
+        usage: dict = {}
+        try:
+            for raw in resp.iter_lines():
+                if not raw or not raw.startswith(b"data: "):
+                    continue
+                data = raw[6:]
+                if data == b"[DONE]":
+                    break
+                chunk = json.loads(data)
 
-        # Capture token usage from any chunk that carries it
-        if chunk.get("usage"):
-            usage = chunk["usage"]
+                # Capture token usage from any chunk that carries it
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
 
-        choices = chunk.get("choices", [])
-        if not choices:
-            continue
-        choice = choices[0]
-        delta  = choice.get("delta", {})
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta  = choice.get("delta", {})
 
-        if delta.get("content"):
-            print(delta["content"], end="", flush=True)
-            full_content += delta["content"]
+                if delta.get("content"):
+                    print(delta["content"], end="", flush=True)
+                    full_content += delta["content"]
 
-        for tc in delta.get("tool_calls", []):
-            idx = tc["index"]
-            if idx not in acc:
-                acc[idx] = {"id": "", "name": "", "arguments": ""}
-            if tc.get("id"):
-                acc[idx]["id"] = tc["id"]
-            fn = tc.get("function", {})
-            if fn.get("name"):      acc[idx]["name"]      += fn["name"]
-            if fn.get("arguments"): acc[idx]["arguments"] += fn["arguments"]
+                for tc in delta.get("tool_calls", []):
+                    idx = tc["index"]
+                    if idx not in acc:
+                        acc[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc.get("id"):
+                        acc[idx]["id"] = tc["id"]
+                    fn = tc.get("function", {})
+                    if fn.get("name"):      acc[idx]["name"]      += fn["name"]
+                    if fn.get("arguments"): acc[idx]["arguments"] += fn["arguments"]
+            result["ok"] = (full_content, [acc[i] for i in sorted(acc)], usage)
+        except Exception as e:
+            result["err"] = e
 
+    th = threading.Thread(target=_read, daemon=True)
+    th.start()
+    th.join(STREAM_TIMEOUT)
+    if th.is_alive():
+        # resp.close() while _read()'s iter_lines() is still blocked in a
+        # socket read can itself block — it was observed to wait out that
+        # read's own ~30s per-chunk timeout before returning, which defeated
+        # the point of raising promptly here. Fire it off in the background
+        # instead of awaiting it; the abandoned _read thread cleans up on its
+        # own once that underlying read eventually errors out.
+        threading.Thread(target=resp.close, daemon=True).start()
+        raise requests.exceptions.Timeout(
+            f"streaming response produced no output within {STREAM_TIMEOUT}s")
+    if "err" in result:
+        raise result["err"]
+
+    full_content, tool_calls, usage = result["ok"]
     if full_content:
         print()
-
-    return full_content, [acc[i] for i in sorted(acc)], usage
+    return full_content, tool_calls, usage
 
 # ── Output helpers ────────────────────────────────────────────────────────────
 

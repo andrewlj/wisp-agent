@@ -681,8 +681,8 @@ SCHEMAS: list[dict] = [
     _fn("learn",
         "Record a tool usage rule discovered during this task — e.g. when the user "
         "corrects a mistake or a better approach is found. Call this immediately when "
-        "you recognise a correction. The rule is saved to knowledge.md and will apply "
-        "to all future sessions.",
+        "you recognise a correction. The rule is queued for the user's review (/rules) "
+        "and does not take effect until they approve it.",
         {
             "rule": {
                 "type": "string",
@@ -3292,7 +3292,7 @@ def tool_task_step_fail(task_id: str, step_id: int, reason: str = "") -> str:
 
 def tool_learn(rule: str, category: str = "general") -> str:
     import knowledge as _knowledge
-    return _knowledge.append_rule(rule, category)
+    return _knowledge.propose_rule(rule, category, source="learn")
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────

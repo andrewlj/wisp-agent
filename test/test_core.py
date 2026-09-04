@@ -260,6 +260,72 @@ check("a rule naming a real mail tool is accepted",
 check("a rule naming no tool at all is still rejected (by design)",
       _know.append_rule("以后要更礼貌一点").startswith("error:"))
 
+# ── knowledge base: pending-review queue (P4) ─────────────────────────────────
+# Repro of a real incident: knowledge.md had a live, self-contradictory rule
+# ("test emails should use mail_move, not AppleScript" — mail_move IS
+# implemented via AppleScript) that _post_task_reflect wrote automatically
+# with zero review. Auto-written rules (from _post_task_reflect) and
+# learn()-written rules now go through propose_rule() into a "## _pending"
+# section instead of straight into the active/injected file; a human
+# approves or rejects via /rules before anything takes effect.
+print("\nknowledge (pending-review queue)")
+_know._KNOWLEDGE_PATH = Path(_tempfile.mkdtemp()) / "knowledge.md"
+_know._KNOWLEDGE_PATH.write_text(_know._DEFAULT_CONTENT, encoding="utf-8")
+
+check("proposing a valid rule queues it, doesn't go live",
+      _know.propose_rule("清理广告邮件用 mail_delete，不要手动逐封点开",
+                         "mail", source="auto").startswith("ok: proposed"))
+check("load() does NOT include the pending rule (not yet approved)",
+      "mail_delete" not in _know.load())
+check("list_pending() shows exactly the queued candidate",
+      _know.list_pending() == [{"n": 1, "category": "mail",
+                                "rule": "清理广告邮件用 mail_delete，不要手动逐封点开",
+                                "source": "auto"}])
+check("a candidate with no tool keyword is still rejected outright",
+      _know.propose_rule("以后要更礼貌一点").startswith("error:"))
+
+_know.propose_rule("回复邮件应该用 mail_reply，不用 mail_send", "mail", source="learn")
+_know.propose_rule("日历新增事件用 calendar_add，不用手动打开Calendar App",
+                   "calendar", source="auto")
+check("three sequential proposals into the pending section leave no stray "
+      "blank line between them (insert-position bug)",
+      "\n\n-" not in _know._KNOWLEDGE_PATH.read_text().split("## _pending")[1])
+check("an exact-duplicate proposal is skipped, not queued twice",
+      "already covered"
+      in _know.propose_rule("清理广告邮件用 mail_delete，不要手动逐封点开", "mail"))
+# NOTE: _is_similar's word-overlap dedup is inherited as-is (kept simple, per
+# the approved design) and turns out to be largely blind to CJK NEAR-
+# duplicates specifically — re.findall(r"\w+", ...) has no word boundaries
+# inside a run of Chinese characters, so two differently-worded-but-same-
+# meaning rules tokenize into two giant, non-overlapping "words" and score
+# 0% overlap. Verified against the actual near-duplicate pair already live in
+# this user's knowledge.md (two bash/test-command rules) — real overlap: 0.0.
+# Exact/near-identical wording (the common case for repeated auto-reflection
+# on the same mistake) still gets caught; differently-phrased duplicates
+# won't be. Not fixed here — flagged as a known, pre-existing limitation.
+
+_approve_result = _know.approve(1)
+check("approve() promotes via the normal append_rule() path",
+      _approve_result.startswith("ok: rule added to [mail]"))
+check("approved rule is now live via load()", "mail_delete" in _know.load())
+check("approve() shrinks the pending list", len(_know.list_pending()) == 2)
+
+check("reject() on an out-of-range number errors cleanly",
+      _know.approve(99).startswith("error:"))
+
+_reject_result = _know.reject(1)
+check("reject() discards without adding it anywhere",
+      _reject_result.startswith("ok: rejected"))
+check("mail_reply rule never made it into the active file",
+      "mail_reply" not in _know.load())
+
+check("reject_all() clears everything left",
+      _know.reject_all().startswith("ok: rejected 1"))
+check("pending section header is gone once empty",
+      "_pending" not in _know._KNOWLEDGE_PATH.read_text())
+check("reject_all() on an already-empty queue is a harmless no-op",
+      _know.reject_all() == "ok: no pending rules")
+
 # ── read_file: sensitive-path guard ───────────────────────────────────────────
 # Repro of a real gap: unlike write_file/move_file/copy_file/delete_file (all
 # gated by _guard_path), read_file had NO restriction at all — it could read

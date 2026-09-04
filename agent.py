@@ -1156,13 +1156,13 @@ def _post_task_reflect(messages: list) -> None:
         rule_text = (r.get("rule") or "").strip()
         category  = (r.get("category") or "general").strip()
         if rule_text:
-            result = _knowledge.append_rule(rule_text, category)
-            if "rule added" in result:
+            result = _knowledge.propose_rule(rule_text, category, source="auto")
+            if result.startswith("ok: proposed"):
                 written += 1
 
     if written:
         print(f"\n  {_rgb(90,60,180)}◆{C.RESET} {C.DIM}{_rgb(150,120,220)}"
-              f"learned {written} rule{'s' if written > 1 else ''} → knowledge.md{C.RESET}")
+              f"proposed {written} rule{'s' if written > 1 else ''} for review — /rules{C.RESET}")
 
 
 # ── Agent Loop ────────────────────────────────────────────────────────────────
@@ -1750,6 +1750,27 @@ def interactive() -> None:
                         else:
                             print(c(C.GRAY, "  knowledge base is empty"))
     
+                elif cmd == "rules":
+                    a = arg.strip()
+                    if not a:
+                        print(c(C.GRAY, "  " + _knowledge.format_pending().replace("\n", "\n  ")))
+                    elif a == "clear":
+                        result = _knowledge.reject_all()
+                        print(c(C.GREEN if result.startswith("ok:") else C.RED, f"  {result}"))
+                    elif a.startswith("approve ") or a.startswith("reject "):
+                        verb, _, num = a.partition(" ")
+                        try:
+                            n = int(num.strip())
+                        except ValueError:
+                            print(c(C.RED, f"  usage: /rules {verb} <number>"))
+                        else:
+                            fn     = _knowledge.approve if verb == "approve" else _knowledge.reject
+                            result = fn(n)
+                            print(c(C.GREEN if result.startswith("ok:") else C.RED, f"  {result}"))
+                    else:
+                        print(c(C.RED, "  usage: /rules | /rules approve <n> | "
+                                        "/rules reject <n> | /rules clear"))
+
                 elif cmd == "debug":
                     global _DEBUG
                     _DEBUG = not _DEBUG
@@ -1771,6 +1792,10 @@ def interactive() -> None:
                         "  /resume <task-id>  resume an interrupted task\n"
                         "  /knowledge                    show learned tool usage rules\n"
                         "  /knowledge forget <keyword>   remove rules containing keyword\n"
+                        "  /rules                        list rules pending review\n"
+                        "  /rules approve <n>            approve a pending rule\n"
+                        "  /rules reject <n>             discard a pending rule\n"
+                        "  /rules clear                  discard all pending rules\n"
                         "  /debug             toggle verbose debug output\n"
                         "  /exit              quit wisp"
                     ))

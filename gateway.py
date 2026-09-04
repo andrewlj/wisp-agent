@@ -105,6 +105,10 @@ _HELP = ("我是 wisp，可多轮对话（记得上文）。直接发指令，�
          "/new 开新会话（清空上下文）\n"
          "/status 查看运行状态与上下文占用\n"
          "/jobs 查看定时任务\n"
+         "/rules 查看待审核的自学习规则\n"
+         "/rules approve <n> 批准第 n 条\n"
+         "/rules reject <n> 丢弃第 n 条\n"
+         "/rules clear 全部丢弃\n"
          "/help 帮助")
 
 
@@ -113,6 +117,7 @@ def run() -> None:
     persistent multi-turn session (auto-compressed). Blocks forever."""
     import agent
     import schedule
+    import knowledge as _knowledge
     token   = agent.TELEGRAM_BOT_TOKEN
     user_id = agent.TELEGRAM_USER_ID
     if not token or not user_id:
@@ -157,6 +162,23 @@ def run() -> None:
                 agent._telegram_send(_status_text(agent, session, started)); continue
             if low == "/jobs":
                 agent._telegram_send("⏰ 定时任务\n" + schedule.format_jobs()); continue
+            if low == "/rules" or low.startswith("/rules "):
+                rules_arg = text[len("/rules"):].strip()
+                if not rules_arg:
+                    agent._telegram_send("📋 待审核规则\n" + _knowledge.format_pending())
+                elif rules_arg.lower() == "clear":
+                    agent._telegram_send(_knowledge.reject_all())
+                else:
+                    rp   = rules_arg.split(maxsplit=1)
+                    verb = rp[0].lower() if rp else ""
+                    num  = rp[1].strip() if len(rp) > 1 else ""
+                    if verb in ("approve", "reject") and num.isdigit():
+                        fn = _knowledge.approve if verb == "approve" else _knowledge.reject
+                        agent._telegram_send(fn(int(num)))
+                    else:
+                        agent._telegram_send("用法：/rules | /rules approve <n> | "
+                                              "/rules reject <n> | /rules clear")
+                continue
 
             # Keep a "typing…" indicator alive while the (possibly multi-minute)
             # task runs, so the chat doesn't look frozen.

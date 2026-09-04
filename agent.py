@@ -784,6 +784,14 @@ def run_turn(messages: list, turn: int = 0, max_turns: int = 0,
 
         if name == "done":
             _print_done(args.get("result", "") if isinstance(args, dict) else "")
+            # Every tool_call needs a matching tool-result message — without
+            # this, the assistant message that calls `done` is left with an
+            # unanswered tool_call. In a persistent session (Telegram) that
+            # invalid pairing sits in history until _maybe_compress happens to
+            # run (it's the only thing that currently repairs pairing), which
+            # can be many turns later or never for a short conversation — the
+            # next request in between risks a 400 from the strict API shape.
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": "ok"})
             return True
 
         # A — time each tool dispatch
